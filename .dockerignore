@@ -1,0 +1,13 @@
+.git
+.gitignore
+.idea
+.venv
+__pycache__
+.pytest_cache
+tests
+deploy
+scripts
+*.pyc
+*.pyo
+*.pyd
+README.md

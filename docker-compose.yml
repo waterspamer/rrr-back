@@ -1,0 +1,9 @@
+services:
+  rrr-backend:
+    build: .
+    container_name: rrr-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8080}:8080"

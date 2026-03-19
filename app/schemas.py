@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class SessionGuestCreateRequest(BaseModel):
+    player_name: str = Field(min_length=3, max_length=32)
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    player_id: str
+    player_name: str
+    session_token: str
+    created_at: str
+    expires_at: str
+
+
+class CarCustomization(BaseModel):
+    selector_path: str = Field(max_length=128)
+    variant_name: str = Field(max_length=128)
+
+
+class PaintPayload(BaseModel):
+    r: float
+    g: float
+    b: float
+    a: float
+
+
+class CarConfigPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    version: int
+    loadout_name: str = Field(max_length=128)
+    loadout_display_name: str | None = Field(default=None, max_length=128)
+    body_set_option_index: int | None = None
+    engine_index: int | None = None
+    suspension_index: int | None = None
+    paint_index: int | None = None
+    body_set_name: str | None = Field(default=None, max_length=128)
+    engine_name: str | None = Field(default=None, max_length=128)
+    suspension_name: str | None = Field(default=None, max_length=128)
+    paint_name: str | None = Field(default=None, max_length=128)
+    has_paint: bool | None = None
+    paint: PaintPayload | None = None
+    customizations: list[CarCustomization] = Field(default_factory=list, max_length=128)
+
+    @model_validator(mode="after")
+    def check_json_size(self) -> "CarConfigPayload":
+        encoded = json.dumps(self.model_dump(mode="json")).encode("utf-8")
+        if len(encoded) > 32 * 1024:
+            raise ValueError("car_config exceeds 32 KB")
+        return self
+
+
+class LobbyCreateRequest(BaseModel):
+    name: str = Field(min_length=3, max_length=32)
+    map_id: str = Field(min_length=1, max_length=64)
+    max_players: int = Field(ge=2, le=8)
+    car_config: CarConfigPayload
+
+
+class LobbyJoinRequest(BaseModel):
+    car_config: CarConfigPayload
+
+
+class LobbyCarConfigUpdateRequest(BaseModel):
+    car_config: CarConfigPayload
+
+
+class LobbyPlayerResponse(BaseModel):
+    player_id: str
+    player_name: str
+    connection_state: str
+    joined_at: str | None = None
+    car_config: dict[str, Any] | None = None
+
+
+class LobbySummaryResponse(BaseModel):
+    lobby_id: str
+    name: str
+    status: str
+    map_id: str
+    max_players: int
+    current_players: int
+
+
+class LobbyDetailResponse(LobbySummaryResponse):
+    owner_player_id: str
+    players: list[LobbyPlayerResponse]
+    created_at: str
+    match_id: str | None = None
+
+
+class LobbyCreateResponse(BaseModel):
+    lobby_id: str
+    status: str
+
+
+class LobbyJoinResponse(BaseModel):
+    lobby_id: str
+    player_id: str
+    joined: bool
+
+
+class SimpleSuccessResponse(BaseModel):
+    updated: bool | None = None
+    left: bool | None = None
+
+
+class PaginatedLobbiesResponse(BaseModel):
+    items: list[LobbySummaryResponse]
+    total: int
+
+
+class MatchInfoResponse(BaseModel):
+    match_id: str
+    lobby_id: str
+    status: str
+    map_id: str
+    tick_rate: int
+
+
+class HealthResponse(BaseModel):
+    status: str
+    lobbies: int
+    matches: int
+    sessions: int
