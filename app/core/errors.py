@@ -11,7 +11,7 @@ class ErrorPayload:
 
 class ApiError(HTTPException):
     def __init__(self, status_code: int, code: str, message: str) -> None:
-        super().__init__(status_code=status_code, detail=ErrorPayload(code=code, message=message).__dict__)
+        super().__init__(status_code=status_code, detail={"code": code, "message": message})
 
 
 def unauthorized(message: str = "Invalid or expired session token") -> ApiError:
@@ -44,4 +44,3 @@ def player_not_in_lobby() -> ApiError:
 
 def match_not_found() -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, "MATCH_NOT_FOUND", "Match not found")
-

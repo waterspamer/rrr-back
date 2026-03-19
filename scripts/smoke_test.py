@@ -58,13 +58,29 @@ async def recv_matching_snapshot(
     raise TimeoutError("Timed out waiting for matching lobby_snapshot")
 
 
+async def recv_admin_match_state(
+    ws: websockets.ClientConnection,
+    match_id: str,
+    timeout: float = 10,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=deadline - time.monotonic())
+        payload = json.loads(raw)
+        if payload.get("type") == "admin_match_state" and payload.get("match_id") == match_id:
+            return payload
+    raise TimeoutError("Timed out waiting for admin_match_state")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True, help="Example: https://rrr-demo.tonforspeed.space")
+    parser.add_argument("--admin-token", default="", help="Optional admin token for admin endpoints and websocket")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
     ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://") + "/api/v1/ws"
+    admin_ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://") + "/api/v1/admin/ws"
 
     async with httpx.AsyncClient(base_url=base_url, timeout=10) as client:
         session_1 = (
@@ -74,9 +90,13 @@ async def main() -> None:
             await client.post("/api/v1/sessions/guest", json={"player_name": "Guest_3002"})
         ).json()
 
-        async with websockets.connect(f"{ws_url}?session_token={session_1['session_token']}") as ws1, websockets.connect(
-            f"{ws_url}?session_token={session_2['session_token']}"
-        ) as ws2:
+        admin_query = f"?token={args.admin_token}" if args.admin_token else ""
+        async with websockets.connect(f"{admin_ws_url}{admin_query}") as admin_ws, websockets.connect(
+            f"{ws_url}?session_token={session_1['session_token']}"
+        ) as ws1, websockets.connect(f"{ws_url}?session_token={session_2['session_token']}") as ws2:
+            await recv_until(admin_ws, {"admin_connected"})
+            await recv_until(admin_ws, {"admin_lobbies_snapshot"})
+            await recv_until(admin_ws, {"admin_matches_snapshot"})
             await recv_until(ws1, {"welcome"})
             await recv_until(ws2, {"welcome"})
 
@@ -92,6 +112,11 @@ async def main() -> None:
             )
             create_resp.raise_for_status()
             lobby_id = create_resp.json()["lobby_id"]
+
+            admin_params = {"token": args.admin_token} if args.admin_token else {}
+            admin_lobbies_resp = await client.get("/api/v1/admin/lobbies", params=admin_params)
+            admin_lobbies_resp.raise_for_status()
+            assert admin_lobbies_resp.json()["items"][0]["lobby_id"] == lobby_id
 
             await ws1.send(json.dumps({"type": "subscribe_lobby", "lobby_id": lobby_id}))
             await ws2.send(json.dumps({"type": "subscribe_lobby", "lobby_id": lobby_id}))
@@ -158,7 +183,23 @@ async def main() -> None:
             )
 
             state = await recv_until(ws1, {"match_state"})
-            print(json.dumps({"status": "ok", "match_id": match_id, "players": len(state["players"])}, indent=2))
+            admin_state = await recv_admin_match_state(admin_ws, match_id)
+            admin_match_resp = await client.get(f"/api/v1/admin/matches/{match_id}", params=admin_params)
+            admin_match_resp.raise_for_status()
+            admin_match = admin_match_resp.json()
+
+            print(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "match_id": match_id,
+                        "players": len(state["players"]),
+                        "admin_players": len(admin_state["players"]),
+                        "admin_match_status": admin_match["status"],
+                    },
+                    indent=2,
+                )
+            )
 
 
 if __name__ == "__main__":

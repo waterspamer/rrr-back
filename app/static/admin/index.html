@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RRR Observer</title>
+    <link rel="stylesheet" href="/admin-assets/admin/styles.css">
+</head>
+<body>
+<div class="shell">
+    <header class="hero">
+        <div>
+            <p class="eyebrow">Russian Road Rage</p>
+            <h1>Observer Console</h1>
+            <p class="subtitle">Realtime debug view for lobbies, matches, player states, and live position snapshots.</p>
+        </div>
+        <div class="hero-status">
+            <div class="status-line">
+                <span class="status-dot" id="wsDot"></span>
+                <span id="wsStatus">disconnected</span>
+            </div>
+            <p class="status-meta" id="statusMessage">Waiting for initial sync</p>
+        </div>
+    </header>
+
+    <section class="toolbar panel">
+        <label class="token-field">
+            <span>Admin token</span>
+            <input id="tokenInput" type="password" placeholder="optional">
+        </label>
+        <div class="toolbar-actions">
+            <button id="applyTokenButton" type="button">Apply token</button>
+            <button id="refreshButton" type="button" class="secondary">Refresh snapshot</button>
+        </div>
+        <div class="toolbar-stats">
+            <div>
+                <strong id="lobbyCount">0</strong>
+                <span>lobbies</span>
+            </div>
+            <div>
+                <strong id="matchCount">0</strong>
+                <span>matches</span>
+            </div>
+        </div>
+    </section>
+
+    <main class="layout">
+        <aside class="rail">
+            <section class="panel list-panel">
+                <div class="panel-head">
+                    <h2>Lobbies</h2>
+                    <span id="lobbyBadge" class="badge">0 active</span>
+                </div>
+                <div id="lobbiesList" class="stack empty-state">No lobbies yet</div>
+            </section>
+
+            <section class="panel list-panel">
+                <div class="panel-head">
+                    <h2>Matches</h2>
+                    <span id="matchBadge" class="badge">0 active</span>
+                </div>
+                <div id="matchesList" class="stack empty-state">No matches yet</div>
+            </section>
+        </aside>
+
+        <section class="content">
+            <section class="panel summary-grid">
+                <article>
+                    <p class="label">Selected lobby</p>
+                    <strong id="selectedLobbyLabel">none</strong>
+                    <span id="selectedLobbyMeta">pick a lobby from the list</span>
+                </article>
+                <article>
+                    <p class="label">Selected match</p>
+                    <strong id="selectedMatchLabel">none</strong>
+                    <span id="selectedMatchMeta">pick a match from the list</span>
+                </article>
+                <article>
+                    <p class="label">Server tick</p>
+                    <strong id="serverTickLabel">0</strong>
+                    <span id="serverTickMeta">updates on every admin_match_state</span>
+                </article>
+            </section>
+
+            <section class="panel" id="lobbyDetailPanel">
+                <div class="panel-head">
+                    <h2>Lobby Detail</h2>
+                    <span id="lobbyStatusPill" class="status-pill neutral">idle</span>
+                </div>
+                <div id="lobbyDetail" class="empty-state">Select a lobby to inspect players and car configs.</div>
+            </section>
+
+            <section class="panel match-grid">
+                <div class="match-main">
+                    <div class="panel-head">
+                        <h2>Match Detail</h2>
+                        <span id="matchStatusPill" class="status-pill neutral">idle</span>
+                    </div>
+                    <div id="matchSummary" class="match-summary empty-state">Select a match to inspect.</div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>player_id</th>
+                                <th>player_name</th>
+                                <th>x</th>
+                                <th>y</th>
+                                <th>z</th>
+                                <th>rot_y</th>
+                                <th>speed</th>
+                                <th>connection</th>
+                            </tr>
+                            </thead>
+                            <tbody id="playersTable"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="panel map-panel">
+                    <div class="panel-head">
+                        <h2>Top-Down Map</h2>
+                        <span class="badge">x / z projection</span>
+                    </div>
+                    <canvas id="matchCanvas" width="600" height="380"></canvas>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-head">
+                    <h2>Raw JSON Snapshot</h2>
+                    <span class="badge">admin detail / state payload</span>
+                </div>
+                <pre id="rawSnapshot" class="raw-block">{}</pre>
+            </section>
+        </section>
+    </main>
+</div>
+
+<script src="/admin-assets/admin/app.js"></script>
+</body>
+</html>

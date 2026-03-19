@@ -14,6 +14,12 @@ FastAPI backend for the `Russian Road Rage` lobby and authoritative multiplayer 
 - `GET /api/v1/matches/{match_id}`
 - `GET /api/v1/health`
 - `GET /api/v1/ws?session_token=...`
+- `GET /admin`
+- `GET /api/v1/admin/lobbies`
+- `GET /api/v1/admin/lobbies/{lobby_id}`
+- `GET /api/v1/admin/matches`
+- `GET /api/v1/admin/matches/{match_id}`
+- `GET /api/v1/admin/ws?token=...`
 
 ## WebSocket messages
 
@@ -37,6 +43,22 @@ Server to client:
 - `match_state`
 - `player_disconnected`
 - `error`
+
+Admin WebSocket events:
+
+- `admin_connected`
+- `admin_lobbies_snapshot`
+- `admin_lobby_updated`
+- `admin_matches_snapshot`
+- `admin_match_updated`
+- `admin_match_state`
+- `error`
+
+## Observer panel
+
+- URL: `/admin`
+- Static frontend files: [`app/static/admin/index.html`](/C:/Work/RRRBack/app/static/admin/index.html), [`app/static/admin/app.js`](/C:/Work/RRRBack/app/static/admin/app.js), [`app/static/admin/styles.css`](/C:/Work/RRRBack/app/static/admin/styles.css)
+- Admin auth: optional `ADMIN_TOKEN`; if set, pass it as `?token=...` to `/admin`, admin REST endpoints, and `/api/v1/admin/ws`
 
 ## Local run
 

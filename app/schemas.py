@@ -141,3 +141,67 @@ class HealthResponse(BaseModel):
     lobbies: int
     matches: int
     sessions: int
+
+
+class AdminLobbyPlayerResponse(BaseModel):
+    player_id: str
+    player_name: str
+    connection_state: str
+    joined_at: str
+    car_config: dict[str, Any]
+    loadout_display_name: str | None = None
+    paint_name: str | None = None
+    customizations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AdminLobbyResponse(BaseModel):
+    lobby_id: str
+    name: str
+    status: str
+    map_id: str
+    max_players: int
+    current_players: int
+    owner_player_id: str
+    created_at: str
+    match_id: str | None = None
+    players: list[AdminLobbyPlayerResponse]
+
+
+class AdminLobbiesResponse(BaseModel):
+    items: list[AdminLobbyResponse]
+
+
+class AdminMatchPlayerResponse(BaseModel):
+    player_id: str
+    player_name: str
+    connection_state: str
+    position: dict[str, float]
+    rotation: dict[str, float]
+    velocity: dict[str, float]
+    speed: float
+    last_snapshot_at: str
+    car_config: dict[str, Any]
+
+
+class AdminMatchSummaryResponse(BaseModel):
+    match_id: str
+    lobby_id: str
+    status: str
+    map_id: str
+    player_count: int
+    server_tick: int
+
+
+class AdminMatchesResponse(BaseModel):
+    items: list[AdminMatchSummaryResponse]
+
+
+class AdminMatchDetailResponse(BaseModel):
+    match_id: str
+    lobby_id: str
+    status: str
+    map_id: str
+    tick_rate: int
+    server_tick: int
+    players: list[AdminMatchPlayerResponse]
+    raw_snapshot: dict[str, Any]

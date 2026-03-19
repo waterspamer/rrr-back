@@ -61,6 +61,7 @@ class RuntimeState:
         self.player_to_lobby: dict[str, str] = {}
         self.matches_by_id: dict[str, Match] = {}
         self.player_connections: dict[str, WebSocket] = {}
+        self.admin_connections: dict[int, WebSocket] = {}
         self.lobby_subscribers: dict[str, set[str]] = defaultdict(set)
         self.countdown_tasks: dict[str, asyncio.Task[None]] = {}
         self.loading_tasks: dict[str, asyncio.Task[None]] = {}
@@ -85,6 +86,10 @@ class RuntimeState:
             "lobbies": len(self.lobbies_by_id),
             "matches": len(self.matches_by_id),
         }
+
+    def validate_admin_token(self, token: str | None) -> None:
+        if self.settings.admin_token and token != self.settings.admin_token:
+            raise unauthorized("Invalid admin token")
 
     async def create_guest_session(self, player_name: str, client_host: str) -> Session:
         if not self.guest_rate_limit.hit(client_host or "unknown"):
@@ -174,6 +179,7 @@ class RuntimeState:
             self.player_to_lobby[session.player_id] = lobby_id
         logger.info("lobby_created lobby_id=%s player_id=%s", lobby_id, session.player_id)
         await self._broadcast_lobby_snapshot(lobby_id)
+        await self._broadcast_admin_lobby_change(lobby_id)
         await self._maybe_start_lobby(lobby_id)
         return {"lobby_id": lobby_id, "status": lobby.status.value}
 
@@ -212,6 +218,7 @@ class RuntimeState:
             },
         )
         await self._broadcast_lobby_snapshot(lobby_id, precomputed=lobby_snapshot)
+        await self._broadcast_admin_lobby_change(lobby_id)
         await self._maybe_start_lobby(lobby_id)
         return {"lobby_id": lobby_id, "player_id": session.player_id, "joined": True}
 
@@ -241,6 +248,9 @@ class RuntimeState:
         )
         if not deleted_lobby:
             await self._broadcast_lobby_snapshot(lobby_id)
+        await self._broadcast_admin_lobbies_snapshot()
+        if not deleted_lobby:
+            await self._broadcast_admin_lobby_change(lobby_id)
         return {"left": True}
 
     async def update_car_config(self, *, session_token: str, lobby_id: str, car_config: dict[str, Any]) -> dict[str, Any]:
@@ -256,6 +266,7 @@ class RuntimeState:
             player.car_config = car_config
         logger.info("lobby_car_config_updated lobby_id=%s player_id=%s", lobby_id, session.player_id)
         await self._broadcast_lobby_snapshot(lobby_id)
+        await self._broadcast_admin_lobby_change(lobby_id)
         await self._maybe_start_lobby(lobby_id)
         return {"updated": True}
 
@@ -271,6 +282,30 @@ class RuntimeState:
                 "map_id": match.map_id,
                 "tick_rate": match.tick_rate,
             }
+
+    async def list_admin_lobbies(self) -> dict[str, Any]:
+        async with self.lock:
+            items = [self._serialize_admin_lobby(lobby) for lobby in self._sorted_lobbies()]
+        return {"items": items}
+
+    async def get_admin_lobby(self, lobby_id: str) -> dict[str, Any]:
+        async with self.lock:
+            lobby = self.lobbies_by_id.get(lobby_id)
+            if lobby is None:
+                raise lobby_not_found()
+            return self._serialize_admin_lobby(lobby)
+
+    async def list_admin_matches(self) -> dict[str, Any]:
+        async with self.lock:
+            items = [self._serialize_admin_match_summary(match) for match in self._sorted_matches()]
+        return {"items": items}
+
+    async def get_admin_match(self, match_id: str) -> dict[str, Any]:
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                raise match_not_found()
+            return self._serialize_admin_match_detail(match)
 
     async def register_connection(self, token: str, websocket: WebSocket) -> Session:
         session = await self.resolve_session(token)
@@ -293,6 +328,7 @@ class RuntimeState:
         logger.info("ws_connected player_id=%s", session.player_id)
         if lobby_id:
             await self._broadcast_lobby_snapshot(lobby_id)
+            await self._broadcast_admin_lobby_change(lobby_id)
             await self._maybe_start_lobby(lobby_id)
         return session
 
@@ -309,11 +345,50 @@ class RuntimeState:
         logger.info("ws_disconnected player_id=%s", player_id)
         if lobby_id:
             await self._broadcast_lobby_snapshot(lobby_id)
+            await self._broadcast_admin_lobby_change(lobby_id)
         if match_id:
             await self._broadcast_match_players(
                 match_id,
                 {"type": "player_disconnected", "match_id": match_id, "player_id": player_id},
             )
+            await self._broadcast_admin_match_change(match_id)
+
+    async def register_admin_connection(self, token: str | None, websocket: WebSocket) -> None:
+        self.validate_admin_token(token)
+        await websocket.accept()
+        async with self.lock:
+            self.admin_connections[id(websocket)] = websocket
+        logger.info("admin_ws_connected")
+        await self._send_to_admin(
+            websocket,
+            {
+                "type": "admin_connected",
+                "connected": True,
+                "server_time": int(time.time() * 1000),
+            },
+        )
+        await self._send_to_admin(websocket, {"type": "admin_lobbies_snapshot", **(await self.list_admin_lobbies())})
+        await self._send_to_admin(websocket, {"type": "admin_matches_snapshot", **(await self.list_admin_matches())})
+
+    async def unregister_admin_connection(self, websocket: WebSocket) -> None:
+        async with self.lock:
+            self.admin_connections.pop(id(websocket), None)
+        logger.info("admin_ws_disconnected")
+
+    async def admin_websocket_loop(self, websocket: WebSocket) -> None:
+        while True:
+            try:
+                raw = await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") == "ping":
+                await self._send_to_admin(websocket, {"type": "pong", "time": int(time.time() * 1000)})
 
     async def websocket_loop(self, player_id: str, websocket: WebSocket) -> None:
         while True:
@@ -363,6 +438,7 @@ class RuntimeState:
             self.lobby_subscribers[lobby_id].discard(player_id)
 
     async def mark_match_loaded(self, player_id: str, match_id: str) -> None:
+        lobby_id: str | None = None
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -374,7 +450,10 @@ class RuntimeState:
             lobby = self.lobbies_by_id.get(match.lobby_id)
             if lobby and player_id in lobby.players:
                 lobby.players[player_id].connection_state = ConnectionState.loading
+                lobby_id = lobby.lobby_id
         logger.info("match_loaded match_id=%s player_id=%s", match_id, player_id)
+        if lobby_id:
+            await self._broadcast_admin_lobby_change(lobby_id)
 
     async def apply_player_input(self, player_id: str, payload: dict[str, Any]) -> None:
         match_id = str(payload.get("match_id", ""))
@@ -426,6 +505,7 @@ class RuntimeState:
             },
         )
         await self._broadcast_lobby_snapshot(lobby_id, precomputed=lobby_snapshot)
+        await self._broadcast_admin_lobby_change(lobby_id)
 
     async def _countdown_to_match(self, lobby_id: str) -> None:
         try:
@@ -462,6 +542,8 @@ class RuntimeState:
                 lobby_id,
                 {"type": "match_created", "match_id": match_id, "lobby_id": lobby_id, "map_id": match.map_id},
             )
+            await self._broadcast_admin_lobby_change(lobby_id)
+            await self._broadcast_admin_match_change(match_id)
             loading_task = asyncio.create_task(self._await_match_loaded(match_id), name=f"load:{match_id}")
             async with self.lock:
                 self.loading_tasks[match_id] = loading_task
@@ -487,11 +569,17 @@ class RuntimeState:
                         for player_id in match.players:
                             if player_id in lobby.players:
                                 lobby.players[player_id].connection_state = ConnectionState.in_game
+                        lobby_id = lobby.lobby_id
+                    else:
+                        lobby_id = None
                 logger.info("match_started match_id=%s", match_id)
                 await self._broadcast_match_players(
                     match_id,
                     {"type": "match_started", "match_id": match_id, "server_tick": 0},
                 )
+                if lobby_id:
+                    await self._broadcast_admin_lobby_change(lobby_id)
+                await self._broadcast_admin_match_change(match_id)
                 task = asyncio.create_task(self._run_match_loop(match_id), name=f"match:{match_id}")
                 async with self.lock:
                     self.match_tasks[match_id] = task
@@ -530,6 +618,7 @@ class RuntimeState:
                     await self._broadcast_match_players(match_id, event)
                 if snapshot:
                     await self._broadcast_match_players(match_id, snapshot)
+                    await self._broadcast_admin_match_state(match_id, snapshot)
         finally:
             async with self.lock:
                 self.match_tasks.pop(match_id, None)
@@ -599,6 +688,27 @@ class RuntimeState:
             "match_id": lobby.match_id,
         }
 
+    def _serialize_admin_lobby_player(self, player: LobbyPlayer) -> dict[str, Any]:
+        return {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "connection_state": player.connection_state.value,
+            "joined_at": player.joined_at.isoformat() + "Z",
+            "car_config": player.car_config,
+            "loadout_display_name": player.car_config.get("loadout_display_name"),
+            "paint_name": player.car_config.get("paint_name"),
+            "customizations": player.car_config.get("customizations", []),
+        }
+
+    def _serialize_admin_lobby(self, lobby: Lobby) -> dict[str, Any]:
+        return {
+            **self._serialize_lobby_summary(lobby),
+            "owner_player_id": lobby.owner_player_id,
+            "created_at": lobby.created_at.isoformat() + "Z",
+            "match_id": lobby.match_id,
+            "players": [self._serialize_admin_lobby_player(player) for player in lobby.players.values()],
+        }
+
     def _serialize_match_state(self, match: Match) -> dict[str, Any]:
         return {
             "type": "match_state",
@@ -616,6 +726,68 @@ class RuntimeState:
                 for player in match.players.values()
             ],
         }
+
+    def _serialize_admin_match_player(self, match: Match, player: MatchPlayer) -> dict[str, Any]:
+        lobby = self.lobbies_by_id.get(match.lobby_id)
+        connection_state = ConnectionState.disconnected.value
+        if lobby and player.player_id in lobby.players:
+            connection_state = lobby.players[player.player_id].connection_state.value
+        speed = math.sqrt(player.velocity.x**2 + player.velocity.z**2)
+        return {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "connection_state": connection_state,
+            "position": player.position.as_dict(),
+            "rotation": player.rotation.as_dict(),
+            "velocity": player.velocity.as_dict(),
+            "speed": round(speed, 3),
+            "last_snapshot_at": player.last_packet_at.isoformat() + "Z",
+            "car_config": player.car_config,
+        }
+
+    def _serialize_admin_match_summary(self, match: Match) -> dict[str, Any]:
+        return {
+            "match_id": match.match_id,
+            "lobby_id": match.lobby_id,
+            "status": match.status.value,
+            "map_id": match.map_id,
+            "player_count": len(match.players),
+            "server_tick": match.server_tick,
+        }
+
+    def _serialize_admin_match_detail(self, match: Match) -> dict[str, Any]:
+        raw_snapshot = self._serialize_match_state(match)
+        return {
+            "match_id": match.match_id,
+            "lobby_id": match.lobby_id,
+            "status": match.status.value,
+            "map_id": match.map_id,
+            "tick_rate": match.tick_rate,
+            "server_tick": match.server_tick,
+            "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
+            "raw_snapshot": raw_snapshot,
+        }
+
+    def _sorted_lobbies(self) -> list[Lobby]:
+        priority = {
+            LobbyStatus.waiting: 0,
+            LobbyStatus.starting: 1,
+            LobbyStatus.in_game: 2,
+            LobbyStatus.closed: 3,
+        }
+        return sorted(self.lobbies_by_id.values(), key=lambda lobby: (priority.get(lobby.status, 99), lobby.created_at))
+
+    def _sorted_matches(self) -> list[Match]:
+        priority = {
+            MatchStatus.running: 0,
+            MatchStatus.starting: 1,
+            MatchStatus.finished: 2,
+            MatchStatus.aborted: 3,
+        }
+        return sorted(
+            self.matches_by_id.values(),
+            key=lambda match: (priority.get(match.status, 99), match.created_at, match.match_id),
+        )
 
     async def _broadcast_lobby_snapshot(self, lobby_id: str, precomputed: dict[str, Any] | None = None) -> None:
         async with self.lock:
@@ -641,6 +813,49 @@ class RuntimeState:
             player_ids = set(match.players.keys())
         await self._broadcast_to_players(player_ids, payload)
 
+    async def _broadcast_admin_lobbies_snapshot(self) -> None:
+        await self._broadcast_to_admins({"type": "admin_lobbies_snapshot", **(await self.list_admin_lobbies())})
+
+    async def _broadcast_admin_lobby_change(self, lobby_id: str) -> None:
+        try:
+            payload = await self.get_admin_lobby(lobby_id)
+            await self._broadcast_to_admins({"type": "admin_lobby_updated", "lobby": payload})
+        except Exception:
+            await self._broadcast_admin_lobbies_snapshot()
+            return
+        await self._broadcast_admin_lobbies_snapshot()
+
+    async def _broadcast_admin_matches_snapshot(self) -> None:
+        await self._broadcast_to_admins({"type": "admin_matches_snapshot", **(await self.list_admin_matches())})
+
+    async def _broadcast_admin_match_change(self, match_id: str) -> None:
+        try:
+            payload = await self.get_admin_match(match_id)
+            await self._broadcast_to_admins({"type": "admin_match_updated", "match": payload})
+        except Exception:
+            await self._broadcast_admin_matches_snapshot()
+            return
+        await self._broadcast_admin_matches_snapshot()
+
+    async def _broadcast_admin_match_state(self, match_id: str, snapshot: dict[str, Any] | None = None) -> None:
+        if snapshot is None:
+            async with self.lock:
+                match = self.matches_by_id.get(match_id)
+                if match is None:
+                    return
+                snapshot = self._serialize_match_state(match)
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                return
+            payload = {
+                "type": "admin_match_state",
+                "match_id": match_id,
+                "server_tick": snapshot["server_tick"],
+                "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
+            }
+        await self._broadcast_to_admins(payload)
+
     async def _broadcast_to_players(self, player_ids: set[str], payload: dict[str, Any]) -> None:
         for player_id in player_ids:
             await self._send_to_player(player_id, payload)
@@ -665,6 +880,24 @@ class RuntimeState:
             await websocket.close(code=code)
         except RuntimeError:
             return
+
+    async def _broadcast_to_admins(self, payload: dict[str, Any]) -> None:
+        async with self.lock:
+            admin_sockets = list(self.admin_connections.values())
+        stale: list[WebSocket] = []
+        for websocket in admin_sockets:
+            try:
+                await websocket.send_json(payload)
+            except (RuntimeError, WebSocketDisconnect):
+                stale.append(websocket)
+        for websocket in stale:
+            await self.unregister_admin_connection(websocket)
+
+    async def _send_to_admin(self, websocket: WebSocket, payload: dict[str, Any]) -> None:
+        try:
+            await websocket.send_json(payload)
+        except (RuntimeError, WebSocketDisconnect):
+            await self.unregister_admin_connection(websocket)
 
     def serialize_public_session(self, session: Session) -> dict[str, Any]:
         return self._serialize_session(session)

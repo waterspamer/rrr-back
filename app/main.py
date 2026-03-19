@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.api.deps import get_bearer_token, get_runtime
+from app.api.deps import get_admin_token, get_bearer_token, get_runtime
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
 from app.schemas import (
+    AdminLobbiesResponse,
+    AdminLobbyResponse,
+    AdminMatchDetailResponse,
+    AdminMatchesResponse,
     HealthResponse,
     LobbyCarConfigUpdateRequest,
     LobbyCreateRequest,
@@ -26,6 +32,9 @@ from app.schemas import (
     SimpleSuccessResponse,
 )
 from app.services.runtime import RuntimeState
+
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def configure_logging(settings: Settings) -> None:
@@ -60,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.mount("/admin-assets", StaticFiles(directory=STATIC_DIR), name="admin-assets")
 
     @app.exception_handler(ApiError)
     async def api_error_handler(_: Request, exc: ApiError) -> JSONResponse:
@@ -75,6 +85,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse)
     async def health(runtime: RuntimeState = Depends(get_runtime)) -> dict[str, int | str]:
         return {"status": "ok", **runtime.stats()}
+
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/", include_in_schema=False)
+    async def admin_panel() -> FileResponse:
+        return FileResponse(STATIC_DIR / "admin" / "index.html")
 
     @app.post(f"{settings.api_prefix}/sessions/guest", response_model=SessionResponse, status_code=201)
     async def create_guest_session(
@@ -152,6 +167,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_match(match_id: str, runtime: RuntimeState = Depends(get_runtime)) -> dict[str, object]:
         return await runtime.get_match(match_id)
 
+    @app.get(f"{settings.api_prefix}/admin/lobbies", response_model=AdminLobbiesResponse)
+    async def get_admin_lobbies(
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.list_admin_lobbies()
+
+    @app.get(f"{settings.api_prefix}/admin/lobbies/{{lobby_id}}", response_model=AdminLobbyResponse)
+    async def get_admin_lobby(
+        lobby_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.get_admin_lobby(lobby_id)
+
+    @app.get(f"{settings.api_prefix}/admin/matches", response_model=AdminMatchesResponse)
+    async def get_admin_matches(
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.list_admin_matches()
+
+    @app.get(f"{settings.api_prefix}/admin/matches/{{match_id}}", response_model=AdminMatchDetailResponse)
+    async def get_admin_match(
+        match_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.get_admin_match(match_id)
+
     @app.websocket(f"{settings.api_prefix}/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
         token = websocket.query_params.get("session_token")
@@ -178,6 +227,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if "session" in locals():
                 await runtime.unregister_connection(session.player_id)
+
+    @app.websocket(f"{settings.api_prefix}/admin/ws")
+    async def admin_websocket_endpoint(websocket: WebSocket) -> None:
+        token = websocket.query_params.get("token")
+        runtime: RuntimeState = websocket.app.state.runtime
+        try:
+            await runtime.register_admin_connection(token, websocket)
+            await runtime.admin_websocket_loop(websocket)
+        except ApiError as exc:
+            if websocket.client_state.name == "CONNECTING":
+                await websocket.accept()
+            await websocket.send_json({"type": "error", **exc.detail})
+            await websocket.close(code=4401)
+        finally:
+            await runtime.unregister_admin_connection(websocket)
 
     return app
 

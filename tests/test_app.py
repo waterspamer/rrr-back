@@ -50,6 +50,30 @@ def build_client() -> TestClient:
     return TestClient(app)
 
 
+def build_client_with_admin(admin_token: str = "") -> TestClient:
+    app = create_app(
+        Settings(
+            auto_start_countdown_sec=0,
+            match_load_timeout_sec=1,
+            match_tick_rate=10,
+            match_broadcast_rate=10,
+            admin_token=admin_token,
+            docs_url=None,
+            redoc_url=None,
+        )
+    )
+    return TestClient(app)
+
+
+def receive_until(ws, expected_types: set[str], max_messages: int = 32) -> dict[str, object]:
+    last_message = None
+    for _ in range(max_messages):
+        last_message = ws.receive_json()
+        if last_message["type"] in expected_types:
+            return last_message
+    raise AssertionError(f"Did not receive {expected_types}, last_message={last_message}")
+
+
 def test_rest_lobby_lifecycle() -> None:
     with build_client() as client:
         session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_1001"}).json()
@@ -241,3 +265,136 @@ def test_invalid_customizations_contract_returns_400() -> None:
 
         assert response.status_code == 400
         assert response.json()["code"] == "INVALID_REQUEST"
+
+
+def test_admin_rest_and_panel_html() -> None:
+    with build_client_with_admin(admin_token="secret-token") as client:
+        panel = client.get("/admin")
+        assert panel.status_code == 200
+        assert "Observer Console" in panel.text
+
+        unauthorized_response = client.get("/api/v1/admin/lobbies")
+        assert unauthorized_response.status_code == 401
+        assert unauthorized_response.json()["code"] == "UNAUTHORIZED"
+
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_5001"}).json()
+        create = client.post(
+            "/api/v1/lobbies",
+            headers={"Authorization": f"Bearer {session['session_token']}"},
+            json={"name": "Admin Test Lobby", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+        )
+        assert create.status_code == 201
+        lobby_id = create.json()["lobby_id"]
+
+        admin_lobbies = client.get("/api/v1/admin/lobbies", params={"token": "secret-token"})
+        assert admin_lobbies.status_code == 200
+        items = admin_lobbies.json()["items"]
+        assert len(items) == 1
+        assert items[0]["lobby_id"] == lobby_id
+        assert items[0]["players"][0]["loadout_display_name"] == "Cooper"
+        assert items[0]["players"][0]["customizations"] == sample_car_config("Cooper")["customizations"]
+
+        admin_lobby = client.get(f"/api/v1/admin/lobbies/{lobby_id}", params={"token": "secret-token"})
+        assert admin_lobby.status_code == 200
+        assert admin_lobby.json()["owner_player_id"] == session["player_id"]
+
+        admin_matches = client.get("/api/v1/admin/matches", params={"token": "secret-token"})
+        assert admin_matches.status_code == 200
+        assert admin_matches.json()["items"] == []
+
+
+def test_admin_websocket_receives_realtime_match_updates() -> None:
+    with build_client_with_admin(admin_token="secret-token") as client:
+        session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_6001"}).json()
+        session_2 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_6002"}).json()
+
+        with client.websocket_connect("/api/v1/admin/ws?token=secret-token") as admin_ws:
+            assert admin_ws.receive_json()["type"] == "admin_connected"
+            assert admin_ws.receive_json()["type"] == "admin_lobbies_snapshot"
+            assert admin_ws.receive_json()["type"] == "admin_matches_snapshot"
+
+            with client.websocket_connect(f"/api/v1/ws?session_token={session_1['session_token']}") as ws1, client.websocket_connect(
+                f"/api/v1/ws?session_token={session_2['session_token']}"
+            ) as ws2:
+                assert ws1.receive_json()["type"] == "welcome"
+                assert ws2.receive_json()["type"] == "welcome"
+
+                create = client.post(
+                    "/api/v1/lobbies",
+                    headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                    json={"name": "Observer Flow", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+                )
+                assert create.status_code == 201
+                lobby_id = create.json()["lobby_id"]
+
+                lobby_update = receive_until(admin_ws, {"admin_lobby_updated"})
+                assert lobby_update["lobby"]["lobby_id"] == lobby_id
+                assert lobby_update["lobby"]["status"] == "waiting"
+
+                join = client.post(
+                    f"/api/v1/lobbies/{lobby_id}/join",
+                    headers={"Authorization": f"Bearer {session_2['session_token']}"},
+                    json={"car_config": sample_car_config("Mustang")},
+                )
+                assert join.status_code == 200
+
+                last_lobby_status = None
+                match_update = None
+                for _ in range(24):
+                    message = admin_ws.receive_json()
+                    if message["type"] == "admin_lobby_updated":
+                        last_lobby_status = message["lobby"]["status"]
+                    if message["type"] == "admin_match_updated":
+                        match_update = message
+                        break
+
+                assert last_lobby_status in {"starting", "in_game"}
+                assert match_update is not None
+                match_id = match_update["match"]["match_id"]
+
+                admin_match_detail = client.get(f"/api/v1/admin/matches/{match_id}", params={"token": "secret-token"})
+                assert admin_match_detail.status_code == 200
+                assert admin_match_detail.json()["status"] == "starting"
+                assert len(admin_match_detail.json()["players"]) == 2
+
+                ws1.send_json({"type": "match_loaded", "match_id": match_id})
+                ws2.send_json({"type": "match_loaded", "match_id": match_id})
+
+                started = False
+                for _ in range(12):
+                    message = receive_until(ws1, {"match_started", "match_state"})
+                    if message["type"] == "match_started":
+                        started = True
+                        break
+                if not started:
+                    for _ in range(12):
+                        message = receive_until(ws2, {"match_started", "match_state"})
+                        if message["type"] == "match_started":
+                            started = True
+                            break
+                assert started
+
+                ws1.send_json(
+                    {
+                        "type": "player_input",
+                        "match_id": match_id,
+                        "seq": 1,
+                        "client_time": int(time.time() * 1000),
+                        "input": {"throttle": 1.0, "brake": 0.0, "steer": 0.2, "handbrake": False, "nitro": False},
+                    }
+                )
+                ws2.send_json(
+                    {
+                        "type": "player_input",
+                        "match_id": match_id,
+                        "seq": 1,
+                        "client_time": int(time.time() * 1000),
+                        "input": {"throttle": 0.8, "brake": 0.0, "steer": -0.1, "handbrake": False, "nitro": True},
+                    }
+                )
+
+                admin_state = receive_until(admin_ws, {"admin_match_state"}, max_messages=32)
+                assert admin_state["match_id"] == match_id
+                assert len(admin_state["players"]) == 2
+                assert admin_state["server_tick"] >= 1
+                assert all(player["connection_state"] == "in_game" for player in admin_state["players"])
