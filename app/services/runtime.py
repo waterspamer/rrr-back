@@ -25,10 +25,27 @@ from app.core.errors import (
     player_not_in_lobby,
     unauthorized,
 )
-from app.models import ConnectionState, InputState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session
+from app.models import ConnectionState, InputState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
 
 
 logger = logging.getLogger("rrr.runtime")
+
+MAP_SPAWN_POINTS: dict[str, list[SpawnPoint]] = {
+    "city_default": [
+        SpawnPoint("sp_01", Vec3(0.0, 0.5, 0.0), Vec3(0.0, 0.0, 0.0)),
+        SpawnPoint("sp_02", Vec3(4.5, 0.5, 0.0), Vec3(0.0, 0.0, 0.0)),
+        SpawnPoint("sp_03", Vec3(-4.5, 0.5, 0.0), Vec3(0.0, 0.0, 0.0)),
+        SpawnPoint("sp_04", Vec3(9.0, 0.5, -2.5), Vec3(0.0, 8.0, 0.0)),
+        SpawnPoint("sp_05", Vec3(-9.0, 0.5, -2.5), Vec3(0.0, -8.0, 0.0)),
+        SpawnPoint("sp_06", Vec3(13.5, 0.5, -5.0), Vec3(0.0, 12.0, 0.0)),
+        SpawnPoint("sp_07", Vec3(-13.5, 0.5, -5.0), Vec3(0.0, -12.0, 0.0)),
+        SpawnPoint("sp_08", Vec3(18.0, 0.5, -7.5), Vec3(0.0, 15.0, 0.0)),
+    ],
+    "duel_test": [
+        SpawnPoint("sp_01", Vec3(-2.5, 0.5, 0.0), Vec3(0.0, 0.0, 0.0)),
+        SpawnPoint("sp_02", Vec3(2.5, 0.5, 0.0), Vec3(0.0, 0.0, 0.0)),
+    ],
+}
 
 
 def utcnow() -> datetime:
@@ -152,6 +169,9 @@ class RuntimeState:
     ) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        spawn_points = self._get_map_spawn_points(map_id)
+        if max_players > len(spawn_points):
+            raise invalid_request(f"Map '{map_id}' supports at most {len(spawn_points)} players")
         async with self.lock:
             if len([lobby for lobby in self.lobbies_by_id.values() if lobby.status == LobbyStatus.waiting]) >= self.settings.max_waiting_lobbies:
                 raise invalid_request("Maximum waiting lobbies reached")
@@ -275,13 +295,7 @@ class RuntimeState:
             match = self.matches_by_id.get(match_id)
             if match is None:
                 raise match_not_found()
-            return {
-                "match_id": match.match_id,
-                "lobby_id": match.lobby_id,
-                "status": match.status.value,
-                "map_id": match.map_id,
-                "tick_rate": match.tick_rate,
-            }
+            return self._serialize_match_info(match)
 
     async def list_admin_lobbies(self) -> dict[str, Any]:
         async with self.lock:
@@ -514,12 +528,34 @@ class RuntimeState:
                 lobby = self.lobbies_by_id.get(lobby_id)
                 if lobby is None or lobby.status != LobbyStatus.starting:
                     return
+                spawn_assignments = self._build_spawn_assignments(lobby)
                 match_id = f"match_{uuid4().hex[:12]}"
                 players = {
                     player_id: MatchPlayer(
                         player_id=player.player_id,
                         player_name=player.player_name,
                         car_config=player.car_config,
+                        spawn_point_id=spawn_assignments[player_id].spawn_point_id,
+                        spawn_position=Vec3(
+                            spawn_assignments[player_id].position.x,
+                            spawn_assignments[player_id].position.y,
+                            spawn_assignments[player_id].position.z,
+                        ),
+                        spawn_rotation=Vec3(
+                            spawn_assignments[player_id].rotation.x,
+                            spawn_assignments[player_id].rotation.y,
+                            spawn_assignments[player_id].rotation.z,
+                        ),
+                        position=Vec3(
+                            spawn_assignments[player_id].position.x,
+                            spawn_assignments[player_id].position.y,
+                            spawn_assignments[player_id].position.z,
+                        ),
+                        rotation=Vec3(
+                            spawn_assignments[player_id].rotation.x,
+                            spawn_assignments[player_id].rotation.y,
+                            spawn_assignments[player_id].rotation.z,
+                        ),
                     )
                     for player_id, player in lobby.players.items()
                 }
@@ -540,7 +576,13 @@ class RuntimeState:
             logger.info("match_created lobby_id=%s match_id=%s", lobby_id, match_id)
             await self._broadcast_lobby_event(
                 lobby_id,
-                {"type": "match_created", "match_id": match_id, "lobby_id": lobby_id, "map_id": match.map_id},
+                {
+                    "type": "match_created",
+                    "match_id": match_id,
+                    "lobby_id": lobby_id,
+                    "map_id": match.map_id,
+                    "players": [self._serialize_match_player_info(match, player) for player in match.players.values()],
+                },
             )
             await self._broadcast_admin_lobby_change(lobby_id)
             await self._broadcast_admin_match_change(match_id)
@@ -688,6 +730,31 @@ class RuntimeState:
             "match_id": lobby.match_id,
         }
 
+    def _serialize_match_info(self, match: Match) -> dict[str, Any]:
+        return {
+            "match_id": match.match_id,
+            "lobby_id": match.lobby_id,
+            "status": match.status.value,
+            "map_id": match.map_id,
+            "tick_rate": match.tick_rate,
+            "players": [self._serialize_match_player_info(match, player) for player in match.players.values()],
+        }
+
+    def _serialize_match_player_info(self, match: Match, player: MatchPlayer) -> dict[str, Any]:
+        lobby = self.lobbies_by_id.get(match.lobby_id)
+        connection_state = ConnectionState.disconnected.value
+        if lobby and player.player_id in lobby.players:
+            connection_state = lobby.players[player.player_id].connection_state.value
+        return {
+            "player_id": player.player_id,
+            "player_name": player.player_name,
+            "connection_state": connection_state,
+            "spawn_point_id": player.spawn_point_id,
+            "spawn_position": player.spawn_position.as_dict(),
+            "spawn_rotation": player.spawn_rotation.as_dict(),
+            "car_config": player.car_config,
+        }
+
     def _serialize_admin_lobby_player(self, player: LobbyPlayer) -> dict[str, Any]:
         return {
             "player_id": player.player_id,
@@ -737,6 +804,9 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": connection_state,
+            "spawn_point_id": player.spawn_point_id,
+            "spawn_position": player.spawn_position.as_dict(),
+            "spawn_rotation": player.spawn_rotation.as_dict(),
             "position": player.position.as_dict(),
             "rotation": player.rotation.as_dict(),
             "velocity": player.velocity.as_dict(),
@@ -766,6 +836,24 @@ class RuntimeState:
             "server_tick": match.server_tick,
             "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
             "raw_snapshot": raw_snapshot,
+        }
+
+    def _get_map_spawn_points(self, map_id: str) -> list[SpawnPoint]:
+        spawn_points = MAP_SPAWN_POINTS.get(map_id)
+        if not spawn_points:
+            raise invalid_request(f"Map '{map_id}' has no configured spawn points")
+        return spawn_points
+
+    def _build_spawn_assignments(self, lobby: Lobby) -> dict[str, SpawnPoint]:
+        spawn_points = self._get_map_spawn_points(lobby.map_id)
+        sorted_players = sorted(lobby.players.values(), key=lambda player: (player.joined_at, player.player_id))
+        if len(sorted_players) > len(spawn_points):
+            raise invalid_request(
+                f"Map '{lobby.map_id}' provides only {len(spawn_points)} spawn points for {len(sorted_players)} players"
+            )
+        return {
+            player.player_id: spawn_points[index]
+            for index, player in enumerate(sorted_players)
         }
 
     def _sorted_lobbies(self) -> list[Lobby]:

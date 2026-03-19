@@ -153,6 +153,16 @@ async def main() -> None:
             match_created_2 = await recv_until(ws2, {"match_created"})
             match_id = match_created_1["match_id"]
             assert match_id == match_created_2["match_id"]
+            assert len(match_created_1["players"]) == 2
+            assert len({player["spawn_point_id"] for player in match_created_1["players"]}) == 2
+
+            match_info_resp = await client.get(f"/api/v1/matches/{match_id}")
+            match_info_resp.raise_for_status()
+            match_info = match_info_resp.json()
+            assert len(match_info["players"]) == 2
+            assert {player["spawn_point_id"] for player in match_info["players"]} == {
+                player["spawn_point_id"] for player in match_created_1["players"]
+            }
 
             await ws1.send(json.dumps({"type": "match_loaded", "match_id": match_id}))
             await ws2.send(json.dumps({"type": "match_loaded", "match_id": match_id}))
@@ -194,6 +204,7 @@ async def main() -> None:
                         "status": "ok",
                         "match_id": match_id,
                         "players": len(state["players"]),
+                        "spawn_points": [player["spawn_point_id"] for player in match_info["players"]],
                         "admin_players": len(admin_state["players"]),
                         "admin_match_status": admin_match["status"],
                     },

@@ -66,6 +66,13 @@ class LobbyPlayer:
 
 
 @dataclass(slots=True)
+class SpawnPoint:
+    spawn_point_id: str
+    position: Vec3
+    rotation: Vec3
+
+
+@dataclass(slots=True)
 class Lobby:
     lobby_id: str
     name: str
@@ -83,6 +90,9 @@ class MatchPlayer:
     player_id: str
     player_name: str
     car_config: dict[str, Any]
+    spawn_point_id: str
+    spawn_position: Vec3
+    spawn_rotation: Vec3
     input_state: InputState = field(default_factory=InputState)
     position: Vec3 = field(default_factory=Vec3)
     rotation: Vec3 = field(default_factory=Vec3)

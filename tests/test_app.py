@@ -103,6 +103,20 @@ def test_rest_lobby_lifecycle() -> None:
         assert lobby["current_players"] == 2
 
 
+def test_lobby_rejects_player_count_above_map_spawn_capacity() -> None:
+    with build_client() as client:
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_0999"}).json()
+        response = client.post(
+            "/api/v1/lobbies",
+            headers={"Authorization": f"Bearer {session['session_token']}"},
+            json={"name": "Too Many", "map_id": "duel_test", "max_players": 3, "car_config": sample_car_config("Cooper")},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_REQUEST"
+        assert "supports at most 2 players" in response.json()["message"]
+
+
 def test_websocket_match_flow() -> None:
     with build_client() as client:
         session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_2001"}).json()
@@ -134,6 +148,7 @@ def test_websocket_match_flow() -> None:
             assert join.status_code == 200
 
             match_id = None
+            match_created_payload = None
             seen_types: set[str] = set()
             deadline = time.time() + 5
             while time.time() < deadline and match_id is None:
@@ -142,10 +157,22 @@ def test_websocket_match_flow() -> None:
                     seen_types.add(message["type"])
                     if message["type"] == "match_created":
                         match_id = message["match_id"]
+                        match_created_payload = message
                 if match_id:
                     break
             assert "lobby_starting" in seen_types
             assert match_id is not None
+            assert match_created_payload is not None
+            assert len(match_created_payload["players"]) == 2
+            assert len({player["spawn_point_id"] for player in match_created_payload["players"]}) == 2
+            assert all(player["spawn_position"]["y"] == 0.5 for player in match_created_payload["players"])
+
+            match_info = client.get(f"/api/v1/matches/{match_id}")
+            assert match_info.status_code == 200
+            assert len(match_info.json()["players"]) == 2
+            assert {player["spawn_point_id"] for player in match_info.json()["players"]} == {
+                player["spawn_point_id"] for player in match_created_payload["players"]
+            }
 
             ws1.send_json({"type": "match_loaded", "match_id": match_id})
             ws2.send_json({"type": "match_loaded", "match_id": match_id})
@@ -356,6 +383,7 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 assert admin_match_detail.status_code == 200
                 assert admin_match_detail.json()["status"] == "starting"
                 assert len(admin_match_detail.json()["players"]) == 2
+                assert all(player["spawn_point_id"] for player in admin_match_detail.json()["players"])
 
                 ws1.send_json({"type": "match_loaded", "match_id": match_id})
                 ws2.send_json({"type": "match_loaded", "match_id": match_id})

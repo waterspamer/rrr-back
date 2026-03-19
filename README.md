@@ -60,6 +60,12 @@ Admin WebSocket events:
 - Static frontend files: [`app/static/admin/index.html`](/C:/Work/RRRBack/app/static/admin/index.html), [`app/static/admin/app.js`](/C:/Work/RRRBack/app/static/admin/app.js), [`app/static/admin/styles.css`](/C:/Work/RRRBack/app/static/admin/styles.css)
 - Admin auth: optional `ADMIN_TOKEN`; if set, pass it as `?token=...` to `/admin`, admin REST endpoints, and `/api/v1/admin/ws`
 
+## Spawn contract
+
+- `GET /api/v1/matches/{match_id}` now returns `players[]` with `spawn_point_id`, `spawn_position`, `spawn_rotation`, `car_config`, and `connection_state`
+- `match_created` websocket message now includes the same `players[]` spawn assignment payload
+- spawn assignment is server-authoritative and deterministic: players are ordered by `joined_at`, then mapped to configured spawn points for the selected `map_id`
+
 ## Local run
 
 ```powershell

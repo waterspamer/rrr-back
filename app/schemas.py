@@ -128,12 +128,29 @@ class PaginatedLobbiesResponse(BaseModel):
     total: int
 
 
+class Vec3Response(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
+class MatchPlayerInfoResponse(BaseModel):
+    player_id: str
+    player_name: str
+    connection_state: str
+    spawn_point_id: str
+    spawn_position: Vec3Response
+    spawn_rotation: Vec3Response
+    car_config: dict[str, Any]
+
+
 class MatchInfoResponse(BaseModel):
     match_id: str
     lobby_id: str
     status: str
     map_id: str
     tick_rate: int
+    players: list[MatchPlayerInfoResponse]
 
 
 class HealthResponse(BaseModel):
@@ -175,6 +192,9 @@ class AdminMatchPlayerResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    spawn_point_id: str
+    spawn_position: dict[str, float]
+    spawn_rotation: dict[str, float]
     position: dict[str, float]
     rotation: dict[str, float]
     velocity: dict[str, float]
