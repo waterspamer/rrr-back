@@ -7,7 +7,7 @@ PROJECT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
 if [ -d .git ]; then
-  git pull --ff-only
+  git pull --ff-only origin main
 fi
 
 docker compose up -d --build
