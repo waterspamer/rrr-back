@@ -72,6 +72,24 @@ docker compose up -d --build
 4. Issue a certificate with `certbot` after DNS is pointed to the server.
 5. Use [`deploy/redeploy.sh`](/C:/Work/RRRBack/deploy/redeploy.sh) for pull-and-rebuild redeploys.
 
+## GitHub Actions redeploy
+
+Workflow file: [deploy.yml](/C:/Work/RRRBack/.github/workflows/deploy.yml)
+
+Required repository secrets:
+
+- `SSH_HOST`
+- `SSH_USER`
+- `SSH_PORT`
+- `SSH_PRIVATE_KEY`
+
+The workflow runs tests on every push to `main`, then connects to the server over SSH and executes:
+
+```bash
+cd /root/rrr-back
+sh ./deploy/redeploy.sh
+```
+
 ## MVP limitations
 
 - Single instance only
