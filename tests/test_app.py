@@ -27,6 +27,15 @@ def sample_car_config(name: str) -> dict[str, object]:
     }
 
 
+def updated_car_config(name: str) -> dict[str, object]:
+    config = sample_car_config(name)
+    config["customizations"] = [
+        {"selector_path": "Spoiler", "variant_name": "SetX"},
+        {"selector_path": "Skirts", "variant_name": "SetY"},
+    ]
+    return config
+
+
 def build_client() -> TestClient:
     app = create_app(
         Settings(
@@ -156,3 +165,79 @@ def test_websocket_match_flow() -> None:
                         assert len(message["players"]) == 2
                         break
             assert got_match_state
+
+
+def test_customizations_roundtrip_via_rest_and_realtime() -> None:
+    with build_client() as client:
+        session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_3001"}).json()
+        session_2 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_3002"}).json()
+
+        with client.websocket_connect(f"/api/v1/ws?session_token={session_1['session_token']}") as ws1, client.websocket_connect(
+            f"/api/v1/ws?session_token={session_2['session_token']}"
+        ) as ws2:
+            ws1.receive_json()
+            ws2.receive_json()
+
+            create = client.post(
+                "/api/v1/lobbies",
+                headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                json={"name": "Customization Test", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+            )
+            assert create.status_code == 201
+            lobby_id = create.json()["lobby_id"]
+
+            ws1.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            first_snapshot = ws1.receive_json()
+            assert first_snapshot["type"] == "lobby_snapshot"
+            assert first_snapshot["lobby"]["players"][0]["car_config"]["customizations"] == sample_car_config("Cooper")["customizations"]
+
+            join = client.post(
+                f"/api/v1/lobbies/{lobby_id}/join",
+                headers={"Authorization": f"Bearer {session_2['session_token']}"},
+                json={"car_config": sample_car_config("Mustang")},
+            )
+            assert join.status_code == 200
+
+            detail = client.get(f"/api/v1/lobbies/{lobby_id}")
+            assert detail.status_code == 200
+            players = detail.json()["players"]
+            assert players[0]["car_config"]["customizations"] == sample_car_config("Cooper")["customizations"]
+            assert players[1]["car_config"]["customizations"] == sample_car_config("Mustang")["customizations"]
+
+            update = client.put(
+                f"/api/v1/lobbies/{lobby_id}/car-config",
+                headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                json={"car_config": updated_car_config("Cooper")},
+            )
+            assert update.status_code == 200
+
+            updated_detail = client.get(f"/api/v1/lobbies/{lobby_id}")
+            assert updated_detail.status_code == 200
+            assert updated_detail.json()["players"][0]["car_config"]["customizations"] == updated_car_config("Cooper")["customizations"]
+
+            deadline = time.time() + 5
+            latest_snapshot = None
+            while time.time() < deadline:
+                message = ws1.receive_json()
+                if message["type"] == "lobby_snapshot":
+                    latest_snapshot = message
+                    if message["lobby"]["players"][0]["car_config"]["customizations"] == updated_car_config("Cooper")["customizations"]:
+                        break
+            assert latest_snapshot is not None
+            assert latest_snapshot["lobby"]["players"][0]["car_config"]["customizations"] == updated_car_config("Cooper")["customizations"]
+
+
+def test_invalid_customizations_contract_returns_400() -> None:
+    with build_client() as client:
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_4001"}).json()
+        invalid_config = sample_car_config("Cooper")
+        invalid_config["customizations"] = [{"selectorPath": "BumperF", "variantName": "SetA"}]
+
+        response = client.post(
+            "/api/v1/lobbies",
+            headers={"Authorization": f"Bearer {session['session_token']}"},
+            json={"name": "Invalid Customization", "map_id": "city_default", "max_players": 2, "car_config": invalid_config},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_REQUEST"

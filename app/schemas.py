@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SessionGuestCreateRequest(BaseModel):
@@ -21,11 +20,15 @@ class SessionResponse(BaseModel):
 
 
 class CarCustomization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     selector_path: str = Field(max_length=128)
     variant_name: str = Field(max_length=128)
 
 
 class PaintPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     r: float
     g: float
     b: float
@@ -49,6 +52,13 @@ class CarConfigPayload(BaseModel):
     has_paint: bool | None = None
     paint: PaintPayload | None = None
     customizations: list[CarCustomization] = Field(default_factory=list, max_length=128)
+
+    @field_validator("customizations")
+    @classmethod
+    def validate_customizations(cls, value: list[CarCustomization]) -> list[CarCustomization]:
+        if len(value) > 128:
+            raise ValueError("customizations exceeds 128 entries")
+        return value
 
     @model_validator(mode="after")
     def check_json_size(self) -> "CarConfigPayload":

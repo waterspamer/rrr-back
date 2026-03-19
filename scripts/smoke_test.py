@@ -39,6 +39,25 @@ async def recv_until(ws: websockets.ClientConnection, expected: set[str], timeou
     raise TimeoutError(f"Timed out waiting for {expected}")
 
 
+async def recv_matching_snapshot(
+    ws: websockets.ClientConnection,
+    player_id: str,
+    customizations: list[dict[str, Any]],
+    timeout: float = 10,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=deadline - time.monotonic())
+        payload = json.loads(raw)
+        if payload.get("type") != "lobby_snapshot":
+            continue
+        players = payload["lobby"]["players"]
+        for player in players:
+            if player["player_id"] == player_id and player["car_config"]["customizations"] == customizations:
+                return payload
+    raise TimeoutError("Timed out waiting for matching lobby_snapshot")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True, help="Example: https://rrr-demo.tonforspeed.space")
@@ -85,6 +104,25 @@ async def main() -> None:
                 json={"car_config": sample_car_config("Mustang")},
             )
             join_resp.raise_for_status()
+
+            lobby_detail = await client.get(f"/api/v1/lobbies/{lobby_id}")
+            lobby_detail.raise_for_status()
+            players = lobby_detail.json()["players"]
+            assert players[0]["car_config"]["customizations"] == sample_car_config("Cooper")["customizations"]
+            assert players[1]["car_config"]["customizations"] == sample_car_config("Mustang")["customizations"]
+
+            updated_config = sample_car_config("Cooper")
+            updated_config["customizations"] = [
+                {"selector_path": "Spoiler", "variant_name": "SetX"},
+                {"selector_path": "Skirts", "variant_name": "SetY"},
+            ]
+            update_resp = await client.put(
+                f"/api/v1/lobbies/{lobby_id}/car-config",
+                headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                json={"car_config": updated_config},
+            )
+            update_resp.raise_for_status()
+            await recv_matching_snapshot(ws1, session_1["player_id"], updated_config["customizations"])
 
             match_created_1 = await recv_until(ws1, {"match_created"})
             match_created_2 = await recv_until(ws2, {"match_created"})
