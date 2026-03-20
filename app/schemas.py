@@ -201,6 +201,8 @@ class AdminMatchPlayerResponse(BaseModel):
     velocity: dict[str, float]
     speed: float
     last_snapshot_at: str
+    client_time_ms: int = 0
+    server_received_time_ms: int = 0
     car_config: dict[str, Any]
     wheel_state_count: int = 0
     damage_revision: int = 0

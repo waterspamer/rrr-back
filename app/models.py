@@ -89,6 +89,8 @@ class MatchPlayer:
     rotation: Vec3 = field(default_factory=Vec3)
     velocity: Vec3 = field(default_factory=Vec3)
     wheel_states: list[dict[str, Vec3]] = field(default_factory=list)
+    client_time_ms: int = 0
+    server_received_time_ms: int = 0
     loaded: bool = False
     last_state_seq: int = -1
     last_snapshot_at: datetime = field(default_factory=datetime.utcnow)

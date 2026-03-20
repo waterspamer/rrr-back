@@ -553,6 +553,7 @@ class RuntimeState:
     async def apply_player_state(self, player_id: str, payload: dict[str, Any]) -> None:
         match_id = str(payload.get("match_id", ""))
         seq = int(payload.get("seq", -1))
+        client_time_ms = int(payload.get("client_time", 0) or 0)
         state_payload = payload.get("state") or {}
         async with self.lock:
             match = self.matches_by_id.get(match_id)
@@ -565,6 +566,8 @@ class RuntimeState:
                 return
             player.last_state_seq = seq
             player.last_snapshot_at = utcnow()
+            player.client_time_ms = client_time_ms
+            player.server_received_time_ms = int(time.time() * 1000)
             player.position = self._coerce_vec3(state_payload.get("position"), player.position)
             player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
             player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
@@ -983,6 +986,8 @@ class RuntimeState:
             "players": [
                 {
                     "player_id": player.player_id,
+                    "client_time": player.client_time_ms,
+                    "server_received_time": player.server_received_time_ms,
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
@@ -1016,6 +1021,8 @@ class RuntimeState:
             "velocity": player.velocity.as_dict(),
             "speed": round(speed, 3),
             "last_snapshot_at": player.last_snapshot_at.isoformat() + "Z",
+            "client_time_ms": player.client_time_ms,
+            "server_received_time_ms": player.server_received_time_ms,
             "car_config": player.car_config,
             "wheel_state_count": len(player.wheel_states),
             "damage_revision": player.damage_revision,
