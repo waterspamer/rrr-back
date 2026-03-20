@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     session_ttl_hours: int = 24
     auto_start_countdown_sec: int = 3
     match_tick_rate: int = 20
-    match_broadcast_rate: int = 10
+    match_broadcast_rate: int = 20
     match_load_timeout_sec: int = 10
     disconnect_timeout_sec: int = 10
     lobby_ttl_seconds: int = 300
