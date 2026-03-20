@@ -514,6 +514,9 @@ class RuntimeState:
         if message_type == "damage_state":
             await self.apply_damage_state(player_id, payload)
             return
+        if message_type == "collision_event":
+            await self.apply_collision_event(player_id, payload)
+            return
         if message_type == "ping":
             return
         await self._send_ws_error(player_id, "INVALID_REQUEST", "Unsupported message type")
@@ -605,6 +608,26 @@ class RuntimeState:
         await self._broadcast_match_players(match_id, payload)
         metrics.damage_state_out.add(payload_size)
         await self._broadcast_admin_match_change(match_id)
+
+    async def apply_collision_event(self, player_id: str, payload: dict[str, Any]) -> None:
+        match_id = str(payload.get("match_id", ""))
+        primary_player_id = str(payload.get("primary_player_id", ""))
+        secondary_player_id = str(payload.get("secondary_player_id", ""))
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                raise match_not_found()
+            primary = match.players.get(primary_player_id)
+            secondary = match.players.get(secondary_player_id)
+            if primary is None or secondary is None:
+                raise invalid_request("Collision participants are not part of the match")
+            if primary.player_id == secondary.player_id:
+                raise invalid_request("Collision participants must be different players")
+            if player_id != primary_player_id:
+                raise invalid_request("Only primary collision authority may submit this collision event")
+            if primary.authority_order > secondary.authority_order:
+                raise invalid_request("Primary collision authority order is invalid")
+        await self._broadcast_match_players(match_id, payload)
 
     async def _maintenance_loop(self) -> None:
         try:
@@ -734,6 +757,7 @@ class RuntimeState:
                         player_id=player.player_id,
                         player_name=player.player_name,
                         car_config=player.car_config,
+                        authority_order=index,
                         spawn_point_id=spawn_assignments[player_id].spawn_point_id,
                         spawn_position=Vec3(
                             spawn_assignments[player_id].position.x,
@@ -756,7 +780,7 @@ class RuntimeState:
                             spawn_assignments[player_id].rotation.z,
                         ),
                     )
-                    for player_id, player in lobby.players.items()
+                    for index, (player_id, player) in enumerate(sorted(lobby.players.items(), key=lambda item: (item[1].joined_at, item[0])))
                 }
                 match = Match(
                     match_id=match_id,
@@ -949,6 +973,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": connection_state,
+            "authority_order": player.authority_order,
             "spawn_point_id": player.spawn_point_id,
             "spawn_position": player.spawn_position.as_dict(),
             "spawn_rotation": player.spawn_rotation.as_dict(),
@@ -1013,6 +1038,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": connection_state,
+            "authority_order": player.authority_order,
             "spawn_point_id": player.spawn_point_id,
             "spawn_position": player.spawn_position.as_dict(),
             "spawn_rotation": player.spawn_rotation.as_dict(),

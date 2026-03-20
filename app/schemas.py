@@ -139,6 +139,7 @@ class MatchPlayerInfoResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    authority_order: int
     spawn_point_id: str
     spawn_position: Vec3Response
     spawn_rotation: Vec3Response
@@ -193,6 +194,7 @@ class AdminMatchPlayerResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    authority_order: int
     spawn_point_id: str
     spawn_position: dict[str, float]
     spawn_rotation: dict[str, float]

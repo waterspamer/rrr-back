@@ -82,6 +82,7 @@ class MatchPlayer:
     player_id: str
     player_name: str
     car_config: dict[str, Any]
+    authority_order: int
     spawn_point_id: str
     spawn_position: Vec3
     spawn_rotation: Vec3
