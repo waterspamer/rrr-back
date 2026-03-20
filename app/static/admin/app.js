@@ -74,13 +74,8 @@
             ]);
             state.lobbies = Array.isArray(lobbies.items) ? lobbies.items : [];
             state.matches = Array.isArray(matches.items) ? matches.items : [];
-
-            if (!state.selectedLobbyId && state.lobbies.length) {
-                state.selectedLobbyId = state.lobbies[0].lobby_id;
-            }
-            if (!state.selectedMatchId && state.matches.length) {
-                state.selectedMatchId = state.matches[0].match_id;
-            }
+            syncSelectedLobbyFromList();
+            syncSelectedMatchFromList();
 
             await Promise.all([loadSelectedLobby(), loadSelectedMatch()]);
             render();
@@ -188,9 +183,6 @@
                 break;
             case "admin_lobbies_snapshot":
                 state.lobbies = Array.isArray(payload.items) ? payload.items : [];
-                if (!state.selectedLobbyId && state.lobbies.length) {
-                    state.selectedLobbyId = state.lobbies[0].lobby_id;
-                }
                 syncSelectedLobbyFromList();
                 break;
             case "admin_lobby_updated":
@@ -198,19 +190,18 @@
                 if (state.selectedLobbyId === payload.lobby.lobby_id) {
                     state.selectedLobby = payload.lobby;
                 }
+                syncSelectedLobbyFromList();
                 break;
             case "admin_matches_snapshot":
                 state.matches = Array.isArray(payload.items) ? payload.items : [];
-                if (!state.selectedMatchId && state.matches.length) {
-                    state.selectedMatchId = state.matches[0].match_id;
-                }
-                syncSelectedMatchSummary();
+                syncSelectedMatchFromList();
                 break;
             case "admin_match_updated":
                 upsertById(state.matches, toMatchSummary(payload.match), "match_id");
                 if (state.selectedMatchId === payload.match.match_id) {
                     state.selectedMatch = payload.match;
                 }
+                syncSelectedMatchFromList();
                 break;
             case "admin_match_state":
                 upsertById(state.matches, {
@@ -227,6 +218,7 @@
                         raw_snapshot: payload,
                     };
                 }
+                syncSelectedMatchFromList();
                 break;
             case "error":
                 renderError(new Error(payload.message || "Admin websocket error"));
@@ -263,28 +255,55 @@
     }
 
     function syncSelectedLobbyFromList() {
-        if (!state.selectedLobbyId) {
+        if (!state.lobbies.length) {
+            state.selectedLobbyId = null;
             state.selectedLobby = null;
             return;
         }
+
+        if (!state.selectedLobbyId || !state.lobbies.some(function (lobby) {
+            return lobby.lobby_id === state.selectedLobbyId;
+        })) {
+            state.selectedLobbyId = state.lobbies[0].lobby_id;
+        }
+
         const fromList = state.lobbies.find(function (lobby) {
             return lobby.lobby_id === state.selectedLobbyId;
         });
-        if (fromList && !state.selectedLobby) {
-            state.selectedLobby = fromList;
-        }
+        state.selectedLobby = fromList ? { ...(state.selectedLobby || {}), ...fromList } : null;
     }
 
-    function syncSelectedMatchSummary() {
-        if (!state.selectedMatchId) {
+    function syncSelectedMatchFromList() {
+        if (!state.matches.length) {
+            state.selectedMatchId = null;
+            state.selectedMatch = null;
             return;
         }
+
+        if (!state.selectedMatchId || !state.matches.some(function (match) {
+            return match.match_id === state.selectedMatchId;
+        })) {
+            state.selectedMatchId = state.matches[0].match_id;
+        }
+
         const summary = state.matches.find(function (match) {
             return match.match_id === state.selectedMatchId;
         });
-        if (summary && state.selectedMatch) {
-            state.selectedMatch = { ...summary, ...state.selectedMatch };
-        }
+        state.selectedMatch = summary ? { ...summary, ...(state.selectedMatch || {}) } : null;
+    }
+
+    function selectLobby(lobbyId) {
+        state.selectedLobbyId = lobbyId;
+        syncSelectedLobbyFromList();
+        render();
+        loadSelectedLobby().then(render).catch(renderError);
+    }
+
+    function selectMatch(matchId) {
+        state.selectedMatchId = matchId;
+        syncSelectedMatchFromList();
+        render();
+        loadSelectedMatch().then(render).catch(renderError);
     }
 
     function render() {
@@ -300,17 +319,11 @@
         elements.matchBadge.textContent = `${state.matches.length} active`;
 
         renderList(elements.lobbiesList, state.lobbies, state.selectedLobbyId, "lobby_id", function (lobby) {
-            state.selectedLobbyId = lobby.lobby_id;
-            state.selectedLobby = lobby;
-            render();
-            loadSelectedLobby().then(render).catch(renderError);
+            selectLobby(lobby.lobby_id);
         }, formatLobbyCard);
 
         renderList(elements.matchesList, state.matches, state.selectedMatchId, "match_id", function (match) {
-            state.selectedMatchId = match.match_id;
-            state.selectedMatch = { ...(state.selectedMatch || {}), ...match };
-            render();
-            loadSelectedMatch().then(render).catch(renderError);
+            selectMatch(match.match_id);
         }, formatMatchCard);
     }
 

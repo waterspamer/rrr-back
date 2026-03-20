@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     match_broadcast_rate: int = 10
     match_load_timeout_sec: int = 10
     disconnect_timeout_sec: int = 10
+    lobby_ttl_seconds: int = 300
+    maintenance_interval_sec: int = 5
     admin_token: str = ""
     guest_session_rate_limit: int = 20
     lobby_action_rate_limit: int = 60

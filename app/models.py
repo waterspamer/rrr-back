@@ -38,15 +38,6 @@ class Session:
 
 
 @dataclass(slots=True)
-class InputState:
-    throttle: float = 0.0
-    brake: float = 0.0
-    steer: float = 0.0
-    handbrake: bool = False
-    nitro: bool = False
-
-
-@dataclass(slots=True)
 class Vec3:
     x: float = 0.0
     y: float = 0.0
@@ -82,6 +73,7 @@ class Lobby:
     owner_player_id: str
     players: dict[str, LobbyPlayer]
     created_at: datetime
+    expires_at: datetime
     match_id: str | None = None
 
 
@@ -93,13 +85,12 @@ class MatchPlayer:
     spawn_point_id: str
     spawn_position: Vec3
     spawn_rotation: Vec3
-    input_state: InputState = field(default_factory=InputState)
     position: Vec3 = field(default_factory=Vec3)
     rotation: Vec3 = field(default_factory=Vec3)
     velocity: Vec3 = field(default_factory=Vec3)
     loaded: bool = False
-    last_input_seq: int = -1
-    last_packet_at: datetime = field(default_factory=datetime.utcnow)
+    last_state_seq: int = -1
+    last_snapshot_at: datetime = field(default_factory=datetime.utcnow)
     disconnected_announced: bool = False
 
 

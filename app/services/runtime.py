@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -25,7 +24,7 @@ from app.core.errors import (
     player_not_in_lobby,
     unauthorized,
 )
-from app.models import ConnectionState, InputState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
+from app.models import ConnectionState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
 
 
 logger = logging.getLogger("rrr.runtime")
@@ -83,6 +82,9 @@ class RuntimeState:
         self.countdown_tasks: dict[str, asyncio.Task[None]] = {}
         self.loading_tasks: dict[str, asyncio.Task[None]] = {}
         self.match_tasks: dict[str, asyncio.Task[None]] = {}
+        self.maintenance_task: asyncio.Task[None] | None = asyncio.create_task(
+            self._maintenance_loop(), name="maintenance"
+        )
         self.guest_rate_limit = SlidingWindowRateLimiter(settings.guest_session_rate_limit)
         self.lobby_rate_limit = SlidingWindowRateLimiter(settings.lobby_action_rate_limit)
 
@@ -92,6 +94,8 @@ class RuntimeState:
             *self.loading_tasks.values(),
             *self.match_tasks.values(),
         ]
+        if self.maintenance_task is not None:
+            tasks.append(self.maintenance_task)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -172,6 +176,7 @@ class RuntimeState:
         spawn_points = self._get_map_spawn_points(map_id)
         if max_players > len(spawn_points):
             raise invalid_request(f"Map '{map_id}' supports at most {len(spawn_points)} players")
+        created_at = utcnow()
         async with self.lock:
             if len([lobby for lobby in self.lobbies_by_id.values() if lobby.status == LobbyStatus.waiting]) >= self.settings.max_waiting_lobbies:
                 raise invalid_request("Maximum waiting lobbies reached")
@@ -193,7 +198,8 @@ class RuntimeState:
                 max_players=max_players,
                 owner_player_id=session.player_id,
                 players={session.player_id: player},
-                created_at=utcnow(),
+                created_at=created_at,
+                expires_at=created_at + timedelta(seconds=self.settings.lobby_ttl_seconds),
             )
             self.lobbies_by_id[lobby_id] = lobby
             self.player_to_lobby[session.player_id] = lobby_id
@@ -245,6 +251,8 @@ class RuntimeState:
     async def leave_lobby(self, *, session_token: str, lobby_id: str) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        deleted_lobby = False
+        countdown_cancelled = False
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
             if lobby is None:
@@ -256,11 +264,16 @@ class RuntimeState:
             if not lobby.players:
                 self.lobbies_by_id.pop(lobby_id, None)
                 self.lobby_subscribers.pop(lobby_id, None)
+                task = self.countdown_tasks.pop(lobby_id, None)
+                if task is not None:
+                    task.cancel()
+                    countdown_cancelled = True
                 deleted_lobby = True
             else:
-                deleted_lobby = False
                 if lobby.owner_player_id == session.player_id:
                     lobby.owner_player_id = next(iter(lobby.players))
+                if self._cancel_countdown_if_not_ready_locked(lobby):
+                    countdown_cancelled = True
         logger.info("lobby_leave lobby_id=%s player_id=%s", lobby_id, session.player_id)
         await self._broadcast_lobby_event(
             lobby_id,
@@ -271,11 +284,14 @@ class RuntimeState:
         await self._broadcast_admin_lobbies_snapshot()
         if not deleted_lobby:
             await self._broadcast_admin_lobby_change(lobby_id)
+            if countdown_cancelled:
+                await self._broadcast_lobby_snapshot(lobby_id)
         return {"left": True}
 
     async def update_car_config(self, *, session_token: str, lobby_id: str, car_config: dict[str, Any]) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        countdown_cancelled = False
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
             if lobby is None:
@@ -284,6 +300,7 @@ class RuntimeState:
             if player is None:
                 raise player_not_in_lobby()
             player.car_config = car_config
+            countdown_cancelled = self._cancel_countdown_if_not_ready_locked(lobby)
         logger.info("lobby_car_config_updated lobby_id=%s player_id=%s", lobby_id, session.player_id)
         await self._broadcast_lobby_snapshot(lobby_id)
         await self._broadcast_admin_lobby_change(lobby_id)
@@ -330,6 +347,7 @@ class RuntimeState:
             lobby_id = self.player_to_lobby.get(session.player_id)
             if lobby_id and lobby_id in self.lobbies_by_id and session.player_id in self.lobbies_by_id[lobby_id].players:
                 self.lobbies_by_id[lobby_id].players[session.player_id].connection_state = ConnectionState.connected
+                self._cancel_countdown_if_not_ready_locked(self.lobbies_by_id[lobby_id])
         if old_socket is not None and old_socket is not websocket:
             await self._safe_close(old_socket, code=4001)
         await websocket.send_json(
@@ -354,6 +372,7 @@ class RuntimeState:
             if lobby_id and lobby_id in self.lobbies_by_id and player_id in self.lobbies_by_id[lobby_id].players:
                 self.lobbies_by_id[lobby_id].players[player_id].connection_state = ConnectionState.disconnected
                 match_id = self.lobbies_by_id[lobby_id].match_id
+                self._cancel_countdown_if_not_ready_locked(self.lobbies_by_id[lobby_id])
             for subscribers in self.lobby_subscribers.values():
                 subscribers.discard(player_id)
         logger.info("ws_disconnected player_id=%s", player_id)
@@ -431,8 +450,8 @@ class RuntimeState:
         if message_type == "match_loaded":
             await self.mark_match_loaded(player_id, str(payload.get("match_id", "")))
             return
-        if message_type == "player_input":
-            await self.apply_player_input(player_id, payload)
+        if message_type == "player_state":
+            await self.apply_player_state(player_id, payload)
             return
         if message_type == "ping":
             return
@@ -461,6 +480,7 @@ class RuntimeState:
             if player is None:
                 raise invalid_request("Player is not part of the match")
             player.loaded = True
+            player.last_snapshot_at = utcnow()
             lobby = self.lobbies_by_id.get(match.lobby_id)
             if lobby and player_id in lobby.players:
                 lobby.players[player_id].connection_state = ConnectionState.loading
@@ -469,10 +489,10 @@ class RuntimeState:
         if lobby_id:
             await self._broadcast_admin_lobby_change(lobby_id)
 
-    async def apply_player_input(self, player_id: str, payload: dict[str, Any]) -> None:
+    async def apply_player_state(self, player_id: str, payload: dict[str, Any]) -> None:
         match_id = str(payload.get("match_id", ""))
         seq = int(payload.get("seq", -1))
-        input_payload = payload.get("input") or {}
+        state_payload = payload.get("state") or {}
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -480,28 +500,96 @@ class RuntimeState:
             player = match.players.get(player_id)
             if player is None:
                 raise invalid_request("Player is not part of the match")
-            if match.status != MatchStatus.running or seq <= player.last_input_seq:
+            if match.status != MatchStatus.running or seq <= player.last_state_seq:
                 return
-            player.last_input_seq = seq
-            player.last_packet_at = utcnow()
-            player.input_state = InputState(
-                throttle=max(-1.0, min(1.0, float(input_payload.get("throttle", 0.0)))),
-                brake=max(0.0, min(1.0, float(input_payload.get("brake", 0.0)))),
-                steer=max(-1.0, min(1.0, float(input_payload.get("steer", 0.0)))),
-                handbrake=bool(input_payload.get("handbrake", False)),
-                nitro=bool(input_payload.get("nitro", False)),
+            player.last_state_seq = seq
+            player.last_snapshot_at = utcnow()
+            player.position = self._coerce_vec3(state_payload.get("position"), player.position)
+            player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
+            player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
+            player.disconnected_announced = False
+
+    async def _maintenance_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(max(1, self.settings.maintenance_interval_sec))
+                await self._expire_lobbies()
+        except asyncio.CancelledError:
+            raise
+
+    async def _expire_lobbies(self) -> None:
+        expired: list[tuple[str, set[str]]] = []
+        async with self.lock:
+            now = utcnow()
+            for lobby_id, lobby in list(self.lobbies_by_id.items()):
+                if lobby.status not in {LobbyStatus.waiting, LobbyStatus.starting}:
+                    continue
+                if lobby.expires_at > now:
+                    continue
+
+                task = self.countdown_tasks.pop(lobby_id, None)
+                if task is not None:
+                    task.cancel()
+                player_ids = set(lobby.players.keys())
+                for player_id in player_ids:
+                    self.player_to_lobby.pop(player_id, None)
+                self.lobby_subscribers.pop(lobby_id, None)
+                self.lobbies_by_id.pop(lobby_id, None)
+                expired.append((lobby_id, player_ids))
+
+        for lobby_id, player_ids in expired:
+            logger.info("lobby_expired lobby_id=%s", lobby_id)
+            await self._broadcast_to_players(
+                player_ids,
+                {"type": "lobby_closed", "lobby_id": lobby_id, "reason": "timeout"},
             )
+        if expired:
+            await self._broadcast_admin_lobbies_snapshot()
+
+    def _cancel_countdown_if_not_ready_locked(self, lobby: Lobby) -> bool:
+        if lobby is None or lobby.status != LobbyStatus.starting:
+            return False
+        if self._is_lobby_ready_to_start_locked(lobby):
+            return False
+
+        lobby.status = LobbyStatus.waiting
+        task = self.countdown_tasks.pop(lobby.lobby_id, None)
+        if task is not None:
+            task.cancel()
+        return task is not None
+
+    def _is_lobby_ready_to_start_locked(self, lobby: Lobby) -> bool:
+        if lobby is None or lobby.status not in {LobbyStatus.waiting, LobbyStatus.starting}:
+            return False
+        if len(lobby.players) != lobby.max_players:
+            return False
+        if not all(player.car_config for player in lobby.players.values()):
+            return False
+        return all(player_id in self.player_connections for player_id in lobby.players)
+
+    @staticmethod
+    def _coerce_vec3(payload: dict[str, Any] | None, fallback: Vec3) -> Vec3:
+        if not isinstance(payload, dict):
+            return Vec3(fallback.x, fallback.y, fallback.z)
+
+        def read(key: str, default: float) -> float:
+            try:
+                return float(payload.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        return Vec3(
+            x=read("x", fallback.x),
+            y=read("y", fallback.y),
+            z=read("z", fallback.z),
+        )
 
     async def _maybe_start_lobby(self, lobby_id: str) -> None:
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
             if lobby is None or lobby.status != LobbyStatus.waiting:
                 return
-            if len(lobby.players) != lobby.max_players:
-                return
-            if not all(player.car_config for player in lobby.players.values()):
-                return
-            if not all(player_id in self.player_connections for player_id in lobby.players):
+            if not self._is_lobby_ready_to_start_locked(lobby):
                 return
             if lobby_id in self.countdown_tasks:
                 return
@@ -645,9 +733,8 @@ class RuntimeState:
                     match.server_tick += 1
                     now = utcnow()
                     for player in match.players.values():
-                        self._simulate_player(player, tick_interval)
                         if (
-                            now - player.last_packet_at >= timedelta(seconds=self.settings.disconnect_timeout_sec)
+                            now - player.last_snapshot_at >= timedelta(seconds=self.settings.disconnect_timeout_sec)
                             and not player.disconnected_announced
                         ):
                             player.disconnected_announced = True
@@ -664,24 +751,6 @@ class RuntimeState:
         finally:
             async with self.lock:
                 self.match_tasks.pop(match_id, None)
-
-    def _simulate_player(self, player: MatchPlayer, dt: float) -> None:
-        yaw = player.rotation.y
-        speed = math.sqrt(player.velocity.x**2 + player.velocity.z**2)
-        acceleration = (player.input_state.throttle * 14.0) - (player.input_state.brake * 18.0) - (speed * 0.4)
-        if player.input_state.nitro:
-            acceleration += 8.0
-        if player.input_state.handbrake:
-            acceleration -= 6.0
-        speed = max(0.0, min(65.0, speed + acceleration * dt))
-        turn_multiplier = 0.7 if player.input_state.handbrake else 1.0
-        yaw += player.input_state.steer * 120.0 * turn_multiplier * dt
-        radians = math.radians(yaw)
-        player.velocity.x = math.sin(radians) * speed
-        player.velocity.z = math.cos(radians) * speed
-        player.position.x += player.velocity.x * dt
-        player.position.z += player.velocity.z * dt
-        player.rotation.y = yaw % 360
 
     def _check_lobby_rate_limit(self, player_id: str) -> None:
         if not self.lobby_rate_limit.hit(player_id):
@@ -727,6 +796,7 @@ class RuntimeState:
             "owner_player_id": lobby.owner_player_id,
             "players": [self._serialize_lobby_player(player) for player in lobby.players.values()],
             "created_at": lobby.created_at.isoformat() + "Z",
+            "expires_at": lobby.expires_at.isoformat() + "Z",
             "match_id": lobby.match_id,
         }
 
@@ -772,6 +842,7 @@ class RuntimeState:
             **self._serialize_lobby_summary(lobby),
             "owner_player_id": lobby.owner_player_id,
             "created_at": lobby.created_at.isoformat() + "Z",
+            "expires_at": lobby.expires_at.isoformat() + "Z",
             "match_id": lobby.match_id,
             "players": [self._serialize_admin_lobby_player(player) for player in lobby.players.values()],
         }
@@ -788,7 +859,6 @@ class RuntimeState:
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
-                    "car_config": player.car_config,
                 }
                 for player in match.players.values()
             ],
@@ -799,7 +869,7 @@ class RuntimeState:
         connection_state = ConnectionState.disconnected.value
         if lobby and player.player_id in lobby.players:
             connection_state = lobby.players[player.player_id].connection_state.value
-        speed = math.sqrt(player.velocity.x**2 + player.velocity.z**2)
+        speed = (player.velocity.x**2 + player.velocity.y**2 + player.velocity.z**2) ** 0.5
         return {
             "player_id": player.player_id,
             "player_name": player.player_name,
@@ -811,7 +881,7 @@ class RuntimeState:
             "rotation": player.rotation.as_dict(),
             "velocity": player.velocity.as_dict(),
             "speed": round(speed, 3),
-            "last_snapshot_at": player.last_packet_at.isoformat() + "Z",
+            "last_snapshot_at": player.last_snapshot_at.isoformat() + "Z",
             "car_config": player.car_config,
         }
 

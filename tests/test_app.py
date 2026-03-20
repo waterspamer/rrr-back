@@ -36,7 +36,7 @@ def updated_car_config(name: str) -> dict[str, object]:
     return config
 
 
-def build_client() -> TestClient:
+def build_client(**overrides) -> TestClient:
     app = create_app(
         Settings(
             auto_start_countdown_sec=0,
@@ -45,12 +45,13 @@ def build_client() -> TestClient:
             match_broadcast_rate=10,
             docs_url=None,
             redoc_url=None,
+            **overrides,
         )
     )
     return TestClient(app)
 
 
-def build_client_with_admin(admin_token: str = "") -> TestClient:
+def build_client_with_admin(admin_token: str = "", **overrides) -> TestClient:
     app = create_app(
         Settings(
             auto_start_countdown_sec=0,
@@ -60,6 +61,7 @@ def build_client_with_admin(admin_token: str = "") -> TestClient:
             admin_token=admin_token,
             docs_url=None,
             redoc_url=None,
+            **overrides,
         )
     )
     return TestClient(app)
@@ -115,6 +117,32 @@ def test_lobby_rejects_player_count_above_map_spawn_capacity() -> None:
         assert response.status_code == 400
         assert response.json()["code"] == "INVALID_REQUEST"
         assert "supports at most 2 players" in response.json()["message"]
+
+
+def test_waiting_lobby_expires_after_timeout() -> None:
+    with build_client(lobby_ttl_seconds=1, maintenance_interval_sec=1) as client:
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_TTL"}).json()
+
+        with client.websocket_connect(f"/api/v1/ws?session_token={session['session_token']}") as ws:
+            assert ws.receive_json()["type"] == "welcome"
+
+            create = client.post(
+                "/api/v1/lobbies",
+                headers={"Authorization": f"Bearer {session['session_token']}"},
+                json={"name": "TTL Lobby", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+            )
+            assert create.status_code == 201
+            lobby_id = create.json()["lobby_id"]
+
+            ws.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            assert ws.receive_json()["type"] == "lobby_snapshot"
+
+            closed = receive_until(ws, {"lobby_closed"}, max_messages=64)
+            assert closed["lobby_id"] == lobby_id
+            assert closed["reason"] == "timeout"
+
+        listed = client.get("/api/v1/lobbies").json()
+        assert listed["items"] == []
 
 
 def test_websocket_match_flow() -> None:
@@ -189,20 +217,28 @@ def test_websocket_match_flow() -> None:
 
             ws1.send_json(
                 {
-                    "type": "player_input",
+                    "type": "player_state",
                     "match_id": match_id,
                     "seq": 1,
                     "client_time": int(time.time() * 1000),
-                    "input": {"throttle": 1.0, "brake": 0.0, "steer": 0.2, "handbrake": False, "nitro": False},
+                    "state": {
+                        "position": {"x": 10.0, "y": 0.5, "z": 4.0},
+                        "rotation": {"x": 0.0, "y": 18.0, "z": 0.0},
+                        "velocity": {"x": 2.5, "y": 0.0, "z": 12.0},
+                    },
                 }
             )
             ws2.send_json(
                 {
-                    "type": "player_input",
+                    "type": "player_state",
                     "match_id": match_id,
                     "seq": 1,
                     "client_time": int(time.time() * 1000),
-                    "input": {"throttle": 0.8, "brake": 0.0, "steer": -0.1, "handbrake": False, "nitro": True},
+                    "state": {
+                        "position": {"x": -12.0, "y": 0.5, "z": 7.0},
+                        "rotation": {"x": 0.0, "y": -11.0, "z": 0.0},
+                        "velocity": {"x": -3.0, "y": 0.0, "z": 9.0},
+                    },
                 }
             )
 
@@ -214,6 +250,7 @@ def test_websocket_match_flow() -> None:
                     if message["type"] == "match_state":
                         got_match_state = True
                         assert len(message["players"]) == 2
+                        assert any(player["position"]["x"] == 10.0 for player in message["players"])
                         break
             assert got_match_state
 
@@ -404,20 +441,28 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
 
                 ws1.send_json(
                     {
-                        "type": "player_input",
+                        "type": "player_state",
                         "match_id": match_id,
                         "seq": 1,
                         "client_time": int(time.time() * 1000),
-                        "input": {"throttle": 1.0, "brake": 0.0, "steer": 0.2, "handbrake": False, "nitro": False},
+                        "state": {
+                            "position": {"x": 6.0, "y": 0.5, "z": 3.0},
+                            "rotation": {"x": 0.0, "y": 24.0, "z": 0.0},
+                            "velocity": {"x": 1.0, "y": 0.0, "z": 14.0},
+                        },
                     }
                 )
                 ws2.send_json(
                     {
-                        "type": "player_input",
+                        "type": "player_state",
                         "match_id": match_id,
                         "seq": 1,
                         "client_time": int(time.time() * 1000),
-                        "input": {"throttle": 0.8, "brake": 0.0, "steer": -0.1, "handbrake": False, "nitro": True},
+                        "state": {
+                            "position": {"x": -4.0, "y": 0.5, "z": 8.0},
+                            "rotation": {"x": 0.0, "y": -9.0, "z": 0.0},
+                            "velocity": {"x": -2.0, "y": 0.0, "z": 10.0},
+                        },
                     }
                 )
 
