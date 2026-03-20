@@ -39,6 +39,7 @@
         matchSummary: document.getElementById("matchSummary"),
         networkStats: document.getElementById("networkStats"),
         playersTable: document.getElementById("playersTable"),
+        damageMaps: document.getElementById("damageMaps"),
         rawSnapshot: document.getElementById("rawSnapshot"),
         canvas: document.getElementById("matchCanvas"),
     };
@@ -438,6 +439,8 @@
             elements.matchSummary.className = "match-summary empty-state";
             elements.matchSummary.textContent = "Select a match to inspect.";
             elements.playersTable.replaceChildren();
+            elements.damageMaps.className = "damage-grid empty-state";
+            elements.damageMaps.textContent = "Select a match to inspect damage textures.";
             elements.rawSnapshot.textContent = "{}";
             drawMap([]);
             return;
@@ -466,8 +469,85 @@
             elements.playersTable.appendChild(tr);
         });
 
+        renderDamageMaps(match.players || []);
         elements.rawSnapshot.textContent = JSON.stringify(match.raw_snapshot || match, null, 2);
         drawMap(match.players || []);
+    }
+
+    function renderDamageMaps(players) {
+        if (!players.length) {
+            elements.damageMaps.className = "damage-grid empty-state";
+            elements.damageMaps.textContent = "Waiting for match player data.";
+            return;
+        }
+
+        const cards = players.map(function (player) {
+            const card = document.createElement("article");
+            card.className = "damage-card";
+
+            const title = document.createElement("div");
+            title.className = "item-title";
+            title.innerHTML = `
+                <span>${escapeHtml(player.player_name || player.player_id)}</span>
+                <span class="badge">rev ${escapeHtml(String(player.damage_revision || 0))}</span>
+            `;
+            card.appendChild(title);
+
+            const meta = document.createElement("div");
+            meta.className = "damage-meta";
+            meta.innerHTML = `
+                <div><div class="small">bytes</div><strong>${escapeHtml(String(player.damage_map_bytes || 0))}</strong></div>
+                <div><div class="small">size</div><strong>${escapeHtml(`${player.damage_width || 0}x${player.damage_height || 0}`)}</strong></div>
+                <div><div class="small">last damage</div><strong>${escapeHtml(player.last_damage_at || "n/a")}</strong></div>
+                <div><div class="small">connection</div><strong>${escapeHtml(player.connection_state || "unknown")}</strong></div>
+            `;
+            card.appendChild(meta);
+
+            const preview = document.createElement("canvas");
+            preview.className = "damage-preview";
+            preview.width = Math.max(1, Number(player.damage_width) || 8);
+            preview.height = Math.max(1, Number(player.damage_height) || 16);
+            card.appendChild(preview);
+            drawDamagePreview(preview, player);
+
+            return card;
+        });
+
+        elements.damageMaps.className = "damage-grid";
+        elements.damageMaps.replaceChildren(...cards);
+    }
+
+    function drawDamagePreview(canvas, player) {
+        const context = canvas.getContext("2d");
+        context.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (!player || !player.damage_map_b64 || !player.damage_width || !player.damage_height) {
+            context.fillStyle = "rgba(31, 27, 22, 0.45)";
+            context.font = "10px IBM Plex Mono, monospace";
+            context.fillText("no data", 4, 12);
+            return;
+        }
+
+        try {
+            const raw = atob(player.damage_map_b64);
+            const expectedLength = player.damage_width * player.damage_height * 4;
+            if (raw.length < expectedLength) {
+                context.fillStyle = "rgba(162, 44, 41, 0.75)";
+                context.font = "10px IBM Plex Mono, monospace";
+                context.fillText("truncated", 4, 12);
+                return;
+            }
+
+            const imageData = context.createImageData(player.damage_width, player.damage_height);
+            for (let index = 0; index < expectedLength; index += 1) {
+                imageData.data[index] = raw.charCodeAt(index);
+            }
+            context.putImageData(imageData, 0, 0);
+        } catch (error) {
+            context.fillStyle = "rgba(162, 44, 41, 0.75)";
+            context.font = "10px IBM Plex Mono, monospace";
+            context.fillText("decode error", 4, 12);
+        }
     }
 
     function renderTelemetry() {

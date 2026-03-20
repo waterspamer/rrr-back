@@ -206,7 +206,11 @@ class AdminMatchPlayerResponse(BaseModel):
     car_config: dict[str, Any]
     wheel_state_count: int = 0
     damage_revision: int = 0
+    damage_width: int = 0
+    damage_height: int = 0
     damage_map_bytes: int = 0
+    damage_map_b64: str | None = None
+    last_damage_at: str | None = None
 
 
 class AdminMatchSummaryResponse(BaseModel):

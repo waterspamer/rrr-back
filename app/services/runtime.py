@@ -1026,7 +1026,11 @@ class RuntimeState:
             "car_config": player.car_config,
             "wheel_state_count": len(player.wheel_states),
             "damage_revision": player.damage_revision,
+            "damage_width": player.damage_width,
+            "damage_height": player.damage_height,
             "damage_map_bytes": len(player.damage_map_b64.encode("utf-8")) if player.damage_map_b64 else 0,
+            "damage_map_b64": player.damage_map_b64,
+            "last_damage_at": player.last_damage_at.isoformat() + "Z" if player.last_damage_at else None,
         }
 
     def _serialize_admin_match_summary(self, match: Match) -> dict[str, Any]:

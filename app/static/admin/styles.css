@@ -218,6 +218,10 @@ button.secondary {
     margin-bottom: 14px;
 }
 
+.nested-head {
+    margin-top: 18px;
+}
+
 .badge,
 .status-pill {
     display: inline-flex;
@@ -290,7 +294,8 @@ button.secondary {
 
 .lobby-players,
 .config-list,
-.telemetry-grid {
+.telemetry-grid,
+.damage-grid {
     display: grid;
     gap: 12px;
 }
@@ -299,11 +304,45 @@ button.secondary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.damage-grid {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    margin-top: 10px;
+}
+
 .telemetry-card {
     background: var(--panel-strong);
     border: 1px solid var(--line);
     border-radius: 16px;
     padding: 14px;
+}
+
+.damage-card {
+    background: var(--panel-strong);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+    display: grid;
+    gap: 10px;
+}
+
+.damage-preview {
+    width: 100%;
+    aspect-ratio: 2 / 1;
+    image-rendering: pixelated;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background:
+        linear-gradient(45deg, rgba(0, 0, 0, 0.06) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.06) 75%),
+        linear-gradient(45deg, rgba(0, 0, 0, 0.06) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.06) 75%),
+        #f4efe5;
+    background-position: 0 0, 8px 8px;
+    background-size: 16px 16px;
+}
+
+.damage-meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px 12px;
 }
 
 .telemetry-card strong {
