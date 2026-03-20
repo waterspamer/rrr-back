@@ -17,6 +17,7 @@ def sample_car_config(name: str) -> dict[str, object]:
         "engine_index": 0,
         "suspension_index": 0,
         "paint_index": 2,
+        "handling_name": f"{name}_Handling",
         "body_set_name": "",
         "engine_name": f"{name}_Engine",
         "suspension_name": f"{name}_Suspension",
@@ -251,6 +252,8 @@ def test_websocket_match_flow() -> None:
                         got_match_state = True
                         assert len(message["players"]) == 2
                         assert any(player["position"]["x"] == 10.0 for player in message["players"])
+                        assert all("car_config" in player for player in message["players"])
+                        assert any(player["car_config"]["handling_name"] == "Cooper_Handling" for player in message["players"])
                         break
             assert got_match_state
 

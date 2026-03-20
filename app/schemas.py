@@ -45,6 +45,7 @@ class CarConfigPayload(BaseModel):
     engine_index: int | None = None
     suspension_index: int | None = None
     paint_index: int | None = None
+    handling_name: str | None = Field(default=None, max_length=128)
     body_set_name: str | None = Field(default=None, max_length=128)
     engine_name: str | None = Field(default=None, max_length=128)
     suspension_name: str | None = Field(default=None, max_length=128)

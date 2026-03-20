@@ -859,6 +859,7 @@ class RuntimeState:
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
+                    "car_config": player.car_config,
                 }
                 for player in match.players.values()
             ],
