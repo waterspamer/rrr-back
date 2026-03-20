@@ -575,6 +575,7 @@ class RuntimeState:
             player.position = self._coerce_vec3(state_payload.get("position"), player.position)
             player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
             player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
+            player.angular_velocity = self._coerce_vec3(state_payload.get("angular_velocity"), player.angular_velocity)
             player.wheel_states = self._coerce_wheel_states(state_payload.get("wheel_states"), player.wheel_states)
             player.disconnected_announced = False
             metrics = self._get_match_metrics(match_id)
@@ -636,6 +637,7 @@ class RuntimeState:
         world_point = self._coerce_vec3(payload.get("world_point"), Vec3())
         world_normal = self._coerce_vec3(payload.get("world_normal"), Vec3(0.0, 1.0, 0.0))
         relative_velocity = self._coerce_vec3(payload.get("relative_velocity"), Vec3())
+        impulse_vector = self._coerce_vec3(payload.get("impulse_vector"), Vec3())
         impulse_magnitude = float(payload.get("impulse_magnitude", 0.0) or 0.0)
 
         await self._broadcast_match_players(
@@ -648,6 +650,7 @@ class RuntimeState:
                 "world_point": world_point.as_dict(),
                 "world_normal": world_normal.as_dict(),
                 "relative_velocity": relative_velocity.as_dict(),
+                "impulse_vector": impulse_vector.as_dict(),
                 "impulse_magnitude": impulse_magnitude,
             },
         )
@@ -661,6 +664,7 @@ class RuntimeState:
                 "world_point": world_point.as_dict(),
                 "world_normal": Vec3(-world_normal.x, -world_normal.y, -world_normal.z).as_dict(),
                 "relative_velocity": Vec3(-relative_velocity.x, -relative_velocity.y, -relative_velocity.z).as_dict(),
+                "impulse_vector": Vec3(-impulse_vector.x, -impulse_vector.y, -impulse_vector.z).as_dict(),
                 "impulse_magnitude": impulse_magnitude,
             },
         )
@@ -1052,6 +1056,7 @@ class RuntimeState:
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
+                    "angular_velocity": player.angular_velocity.as_dict(),
                     "wheel_states": [
                         {
                             "position": state["position"].as_dict(),
@@ -1081,6 +1086,7 @@ class RuntimeState:
             "position": player.position.as_dict(),
             "rotation": player.rotation.as_dict(),
             "velocity": player.velocity.as_dict(),
+            "angular_velocity": player.angular_velocity.as_dict(),
             "speed": round(speed, 3),
             "last_snapshot_at": player.last_snapshot_at.isoformat() + "Z",
             "client_time_ms": player.client_time_ms,

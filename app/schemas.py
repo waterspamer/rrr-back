@@ -201,6 +201,7 @@ class AdminMatchPlayerResponse(BaseModel):
     position: dict[str, float]
     rotation: dict[str, float]
     velocity: dict[str, float]
+    angular_velocity: dict[str, float]
     speed: float
     last_snapshot_at: str
     client_time_ms: int = 0

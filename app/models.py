@@ -89,6 +89,7 @@ class MatchPlayer:
     position: Vec3 = field(default_factory=Vec3)
     rotation: Vec3 = field(default_factory=Vec3)
     velocity: Vec3 = field(default_factory=Vec3)
+    angular_velocity: Vec3 = field(default_factory=Vec3)
     wheel_states: list[dict[str, Vec3]] = field(default_factory=list)
     client_time_ms: int = 0
     server_received_time_ms: int = 0
