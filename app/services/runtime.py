@@ -140,6 +140,7 @@ class RuntimeState:
         self.loading_tasks: dict[str, asyncio.Task[None]] = {}
         self.match_tasks: dict[str, asyncio.Task[None]] = {}
         self.match_metrics: dict[str, MatchRuntimeMetrics] = {}
+        self.recent_collision_pairs: dict[str, float] = {}
         self.maintenance_task: asyncio.Task[None] | None = asyncio.create_task(
             self._maintenance_loop(), name="maintenance"
         )
@@ -613,6 +614,8 @@ class RuntimeState:
         match_id = str(payload.get("match_id", ""))
         primary_player_id = str(payload.get("primary_player_id", ""))
         secondary_player_id = str(payload.get("secondary_player_id", ""))
+        collision_pair_key = self._build_collision_pair_key(match_id, primary_player_id, secondary_player_id)
+        now = time.time()
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -624,10 +627,43 @@ class RuntimeState:
             if primary.player_id == secondary.player_id:
                 raise invalid_request("Collision participants must be different players")
             if player_id != primary_player_id:
-                raise invalid_request("Only primary collision authority may submit this collision event")
-            if primary.authority_order > secondary.authority_order:
-                raise invalid_request("Primary collision authority order is invalid")
-        await self._broadcast_match_players(match_id, payload)
+                raise invalid_request("Collision report sender must match primary_player_id")
+            last_collision_at = self.recent_collision_pairs.get(collision_pair_key, 0.0)
+            if now - last_collision_at < 0.12:
+                return
+            self.recent_collision_pairs[collision_pair_key] = now
+
+        world_point = self._coerce_vec3(payload.get("world_point"), Vec3())
+        world_normal = self._coerce_vec3(payload.get("world_normal"), Vec3(0.0, 1.0, 0.0))
+        relative_velocity = self._coerce_vec3(payload.get("relative_velocity"), Vec3())
+        impulse_magnitude = float(payload.get("impulse_magnitude", 0.0) or 0.0)
+
+        await self._broadcast_match_players(
+            match_id,
+            {
+                "type": "collision_event",
+                "match_id": match_id,
+                "primary_player_id": primary_player_id,
+                "secondary_player_id": secondary_player_id,
+                "world_point": world_point.as_dict(),
+                "world_normal": world_normal.as_dict(),
+                "relative_velocity": relative_velocity.as_dict(),
+                "impulse_magnitude": impulse_magnitude,
+            },
+        )
+        await self._broadcast_match_players(
+            match_id,
+            {
+                "type": "collision_event",
+                "match_id": match_id,
+                "primary_player_id": secondary_player_id,
+                "secondary_player_id": primary_player_id,
+                "world_point": world_point.as_dict(),
+                "world_normal": Vec3(-world_normal.x, -world_normal.y, -world_normal.z).as_dict(),
+                "relative_velocity": Vec3(-relative_velocity.x, -relative_velocity.y, -relative_velocity.z).as_dict(),
+                "impulse_magnitude": impulse_magnitude,
+            },
+        )
 
     async def _maintenance_loop(self) -> None:
         try:
@@ -1100,6 +1136,11 @@ class RuntimeState:
             player.player_id: spawn_points[index]
             for index, player in enumerate(sorted_players)
         }
+
+    @staticmethod
+    def _build_collision_pair_key(match_id: str, primary_player_id: str, secondary_player_id: str) -> str:
+        ordered = sorted([primary_player_id, secondary_player_id])
+        return f"{match_id}:{ordered[0]}|{ordered[1]}"
 
     def _sorted_lobbies(self) -> list[Lobby]:
         priority = {
