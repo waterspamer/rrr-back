@@ -10,6 +10,8 @@
         socket: null,
         reconnectTimer: null,
         manualClose: false,
+        lobbyRequestVersion: 0,
+        matchRequestVersion: 0,
     };
 
     const elements = {
@@ -87,12 +89,18 @@
     }
 
     async function loadSelectedLobby() {
+        const requestVersion = ++state.lobbyRequestVersion;
         if (!state.selectedLobbyId) {
             state.selectedLobby = null;
             return;
         }
         try {
-            state.selectedLobby = await apiGet(`/api/v1/admin/lobbies/${state.selectedLobbyId}`);
+            const lobbyId = state.selectedLobbyId;
+            const payload = await apiGet(`/api/v1/admin/lobbies/${lobbyId}`);
+            if (requestVersion !== state.lobbyRequestVersion || lobbyId !== state.selectedLobbyId) {
+                return;
+            }
+            state.selectedLobby = payload;
         } catch (error) {
             state.selectedLobby = null;
             renderError(error);
@@ -100,12 +108,18 @@
     }
 
     async function loadSelectedMatch() {
+        const requestVersion = ++state.matchRequestVersion;
         if (!state.selectedMatchId) {
             state.selectedMatch = null;
             return;
         }
         try {
-            state.selectedMatch = await apiGet(`/api/v1/admin/matches/${state.selectedMatchId}`);
+            const matchId = state.selectedMatchId;
+            const payload = await apiGet(`/api/v1/admin/matches/${matchId}`);
+            if (requestVersion !== state.matchRequestVersion || matchId !== state.selectedMatchId) {
+                return;
+            }
+            state.selectedMatch = payload;
         } catch (error) {
             state.selectedMatch = null;
             renderError(error);
@@ -497,8 +511,29 @@
         const context = canvas.getContext("2d");
         context.clearRect(0, 0, canvas.width, canvas.height);
 
+        const padding = 36;
+        const mapSizeMeters = 300;
+        const halfRange = mapSizeMeters * 0.5;
+        const drawableWidth = canvas.width - padding * 2;
+        const drawableHeight = canvas.height - padding * 2;
+
         context.fillStyle = "rgba(255, 255, 255, 0.06)";
-        context.fillRect(20, 20, canvas.width - 40, canvas.height - 40);
+        context.fillRect(padding, padding, drawableWidth, drawableHeight);
+
+        context.strokeStyle = "rgba(255, 255, 255, 0.08)";
+        context.lineWidth = 1;
+        for (let i = 0; i <= 6; i += 1) {
+            const x = padding + (drawableWidth / 6) * i;
+            const y = padding + (drawableHeight / 6) * i;
+            context.beginPath();
+            context.moveTo(x, padding);
+            context.lineTo(x, canvas.height - padding);
+            context.stroke();
+            context.beginPath();
+            context.moveTo(padding, y);
+            context.lineTo(canvas.width - padding, y);
+            context.stroke();
+        }
 
         if (!players.length) {
             context.fillStyle = "rgba(247, 240, 223, 0.75)";
@@ -515,15 +550,6 @@
                 speed: Number(player.speed) || 0,
             };
         });
-        const xs = positions.map(function (point) { return point.x; });
-        const zs = positions.map(function (point) { return point.z; });
-        const minX = Math.min.apply(null, xs);
-        const maxX = Math.max.apply(null, xs);
-        const minZ = Math.min.apply(null, zs);
-        const maxZ = Math.max.apply(null, zs);
-        const padding = 48;
-        const width = Math.max(1, maxX - minX);
-        const height = Math.max(1, maxZ - minZ);
 
         context.strokeStyle = "rgba(255, 255, 255, 0.16)";
         context.lineWidth = 1;
@@ -535,8 +561,10 @@
         context.stroke();
 
         positions.forEach(function (point, index) {
-            const px = padding + ((point.x - minX) / width) * (canvas.width - padding * 2);
-            const py = canvas.height - padding - ((point.z - minZ) / height) * (canvas.height - padding * 2);
+            const clampedX = Math.max(-halfRange, Math.min(halfRange, point.x));
+            const clampedZ = Math.max(-halfRange, Math.min(halfRange, point.z));
+            const px = padding + ((clampedX + halfRange) / mapSizeMeters) * drawableWidth;
+            const py = canvas.height - padding - ((clampedZ + halfRange) / mapSizeMeters) * drawableHeight;
             const hue = (index * 67) % 360;
 
             context.fillStyle = `hsl(${hue} 85% 62%)`;
@@ -548,6 +576,12 @@
             context.font = "13px IBM Plex Mono, monospace";
             context.fillText(`${point.label} (${point.speed.toFixed(1)})`, px + 12, py - 10);
         });
+
+        context.fillStyle = "rgba(247, 240, 223, 0.65)";
+        context.font = "12px IBM Plex Mono, monospace";
+        context.fillText("-150m", padding, canvas.height - 12);
+        context.fillText("+150m", canvas.width - padding - 38, canvas.height - 12);
+        context.fillText("300m x 300m", canvas.width - 116, 20);
     }
 
     function setStatus(kind, message) {
