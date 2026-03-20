@@ -88,9 +88,15 @@ class MatchPlayer:
     position: Vec3 = field(default_factory=Vec3)
     rotation: Vec3 = field(default_factory=Vec3)
     velocity: Vec3 = field(default_factory=Vec3)
+    wheel_states: list[dict[str, Vec3]] = field(default_factory=list)
     loaded: bool = False
     last_state_seq: int = -1
     last_snapshot_at: datetime = field(default_factory=datetime.utcnow)
+    damage_revision: int = 0
+    damage_width: int = 0
+    damage_height: int = 0
+    damage_map_b64: str | None = None
+    last_damage_at: datetime | None = None
     disconnected_announced: bool = False
 
 

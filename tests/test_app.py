@@ -226,6 +226,12 @@ def test_websocket_match_flow() -> None:
                         "position": {"x": 10.0, "y": 0.5, "z": 4.0},
                         "rotation": {"x": 0.0, "y": 18.0, "z": 0.0},
                         "velocity": {"x": 2.5, "y": 0.0, "z": 12.0},
+                        "wheel_states": [
+                            {"position": {"x": -0.8, "y": 0.1, "z": 1.2}, "rotation": {"x": 12.0, "y": 18.0, "z": 90.0}},
+                            {"position": {"x": 0.8, "y": 0.12, "z": 1.2}, "rotation": {"x": 13.0, "y": 18.0, "z": 90.0}},
+                            {"position": {"x": -0.8, "y": 0.08, "z": -1.2}, "rotation": {"x": 20.0, "y": 0.0, "z": 90.0}},
+                            {"position": {"x": 0.8, "y": 0.1, "z": -1.2}, "rotation": {"x": 19.0, "y": 0.0, "z": 90.0}},
+                        ],
                     },
                 }
             )
@@ -239,6 +245,12 @@ def test_websocket_match_flow() -> None:
                         "position": {"x": -12.0, "y": 0.5, "z": 7.0},
                         "rotation": {"x": 0.0, "y": -11.0, "z": 0.0},
                         "velocity": {"x": -3.0, "y": 0.0, "z": 9.0},
+                        "wheel_states": [
+                            {"position": {"x": -0.9, "y": 0.11, "z": 1.25}, "rotation": {"x": 8.0, "y": -11.0, "z": 90.0}},
+                            {"position": {"x": 0.9, "y": 0.1, "z": 1.25}, "rotation": {"x": 9.0, "y": -11.0, "z": 90.0}},
+                            {"position": {"x": -0.9, "y": 0.09, "z": -1.25}, "rotation": {"x": 16.0, "y": 0.0, "z": 90.0}},
+                            {"position": {"x": 0.9, "y": 0.09, "z": -1.25}, "rotation": {"x": 17.0, "y": 0.0, "z": 90.0}},
+                        ],
                     },
                 }
             )
@@ -252,8 +264,8 @@ def test_websocket_match_flow() -> None:
                         got_match_state = True
                         assert len(message["players"]) == 2
                         assert any(player["position"]["x"] == 10.0 for player in message["players"])
-                        assert all("car_config" in player for player in message["players"])
-                        assert any(player["car_config"]["handling_name"] == "Cooper_Handling" for player in message["players"])
+                        assert all("car_config" not in player for player in message["players"])
+                        assert all(len(player["wheel_states"]) == 4 for player in message["players"])
                         break
             assert got_match_state
 
@@ -474,3 +486,28 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 assert len(admin_state["players"]) == 2
                 assert admin_state["server_tick"] >= 1
                 assert all(player["connection_state"] == "in_game" for player in admin_state["players"])
+                assert "telemetry" in admin_state
+                assert "match_state_out" in admin_state["telemetry"]
+
+                damage_payload = {
+                    "type": "damage_state",
+                    "match_id": match_id,
+                    "player_id": session_1["player_id"],
+                    "revision": 1,
+                    "width": 8,
+                    "height": 16,
+                    "map_b64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                    "world_point": {"x": 1.0, "y": 0.5, "z": 2.0},
+                    "world_normal": {"x": 0.0, "y": 1.0, "z": 0.0},
+                }
+                ws1.send_json(damage_payload)
+
+                damage_event = receive_until(ws2, {"damage_state"}, max_messages=16)
+                assert damage_event["player_id"] == session_1["player_id"]
+                assert damage_event["revision"] == 1
+
+                admin_match_detail = client.get(f"/api/v1/admin/matches/{match_id}", params={"token": "secret-token"})
+                assert admin_match_detail.status_code == 200
+                detail_payload = admin_match_detail.json()
+                assert detail_payload["telemetry"]["damage_state_in"]["total_messages"] >= 1
+                assert any(player["damage_revision"] == 1 for player in detail_payload["players"])

@@ -202,6 +202,9 @@ class AdminMatchPlayerResponse(BaseModel):
     speed: float
     last_snapshot_at: str
     car_config: dict[str, Any]
+    wheel_state_count: int = 0
+    damage_revision: int = 0
+    damage_map_bytes: int = 0
 
 
 class AdminMatchSummaryResponse(BaseModel):
@@ -226,3 +229,4 @@ class AdminMatchDetailResponse(BaseModel):
     server_tick: int
     players: list[AdminMatchPlayerResponse]
     raw_snapshot: dict[str, Any]
+    telemetry: dict[str, Any]

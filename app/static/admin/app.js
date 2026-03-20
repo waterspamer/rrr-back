@@ -35,6 +35,7 @@
         matchStatusPill: document.getElementById("matchStatusPill"),
         lobbyDetail: document.getElementById("lobbyDetail"),
         matchSummary: document.getElementById("matchSummary"),
+        networkStats: document.getElementById("networkStats"),
         playersTable: document.getElementById("playersTable"),
         rawSnapshot: document.getElementById("rawSnapshot"),
         canvas: document.getElementById("matchCanvas"),
@@ -215,7 +216,8 @@
                         match_id: payload.match_id,
                         server_tick: payload.server_tick,
                         players: payload.players || [],
-                        raw_snapshot: payload,
+                        telemetry: payload.telemetry || previous.telemetry || null,
+                        raw_snapshot: payload.raw_snapshot || payload,
                     };
                 }
                 syncSelectedMatchFromList();
@@ -310,6 +312,7 @@
         renderLists();
         renderLobbyDetail();
         renderMatchDetail();
+        renderTelemetry();
     }
 
     function renderLists() {
@@ -453,6 +456,42 @@
         drawMap(match.players || []);
     }
 
+    function renderTelemetry() {
+        const match = state.selectedMatch;
+        if (!match || !match.telemetry) {
+            elements.networkStats.className = "telemetry-grid empty-state";
+            elements.networkStats.textContent = "Select a match to inspect relay load.";
+            return;
+        }
+
+        const telemetry = match.telemetry;
+        const cards = [
+            createTelemetryCard("Player State In", telemetry.player_state_in, [
+                metricLine("msg/s", telemetry.player_state_in && telemetry.player_state_in.messages_per_sec),
+                metricLine("KB/s", kbFromBytes(telemetry.player_state_in && telemetry.player_state_in.bytes_per_sec)),
+                metricLine("total msg", telemetry.player_state_in && telemetry.player_state_in.total_messages),
+            ]),
+            createTelemetryCard("Match State Out", telemetry.match_state_out, [
+                metricLine("msg/s", telemetry.match_state_out && telemetry.match_state_out.messages_per_sec),
+                metricLine("KB/s", kbFromBytes(telemetry.match_state_out && telemetry.match_state_out.bytes_per_sec)),
+                metricLine("last snapshot", `${telemetry.last_match_snapshot_bytes || 0} B`),
+            ]),
+            createTelemetryCard("Damage Relay", telemetry.damage_state_in, [
+                metricLine("damage in/s", telemetry.damage_state_in && telemetry.damage_state_in.messages_per_sec),
+                metricLine("damage out/s", telemetry.damage_state_out && telemetry.damage_state_out.messages_per_sec),
+                metricLine("last damage", `${telemetry.last_damage_payload_bytes || 0} B`),
+            ]),
+            createTelemetryCard("Admin Stream", telemetry.admin_state_out, [
+                metricLine("msg/s", telemetry.admin_state_out && telemetry.admin_state_out.messages_per_sec),
+                metricLine("KB/s", kbFromBytes(telemetry.admin_state_out && telemetry.admin_state_out.bytes_per_sec)),
+                metricLine("tick source", `server tick ${match.server_tick || 0}`),
+            ]),
+        ];
+
+        elements.networkStats.className = "telemetry-grid";
+        elements.networkStats.replaceChildren(...cards);
+    }
+
     function drawMap(players) {
         const canvas = elements.canvas;
         const context = canvas.getContext("2d");
@@ -519,6 +558,29 @@
 
     function renderError(error) {
         setStatus("disconnected", error.message || "Observer error");
+    }
+
+    function createTelemetryCard(title, metric, lines) {
+        const card = document.createElement("article");
+        card.className = "telemetry-card";
+        const windowLabel = metric && metric.window_sec ? `${metric.window_sec}s window` : "rolling window";
+        card.innerHTML = `
+            <div class="small">${escapeHtml(windowLabel)}</div>
+            <strong>${escapeHtml(title)}</strong>
+            <div class="config-list">${lines.map(function (line) {
+                return `<div><div class="small">${escapeHtml(line.label)}</div><strong>${escapeHtml(line.value)}</strong></div>`;
+            }).join("")}</div>
+        `;
+        return card;
+    }
+
+    function metricLine(label, value) {
+        return { label: label, value: value == null ? "n/a" : String(value) };
+    }
+
+    function kbFromBytes(bytesPerSec) {
+        const number = Number(bytesPerSec);
+        return Number.isFinite(number) ? (number / 1024).toFixed(2) : "0.00";
     }
 
     function formatLobbyCard(lobby) {

@@ -289,9 +289,27 @@ button.secondary {
 }
 
 .lobby-players,
-.config-list {
+.config-list,
+.telemetry-grid {
     display: grid;
     gap: 12px;
+}
+
+.telemetry-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.telemetry-card {
+    background: var(--panel-strong);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+}
+
+.telemetry-card strong {
+    display: block;
+    font-size: 20px;
+    margin: 4px 0 10px;
 }
 
 .player-card {

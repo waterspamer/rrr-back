@@ -68,6 +68,63 @@ class SlidingWindowRateLimiter:
         return True
 
 
+class RollingMetricWindow:
+    def __init__(self, window_sec: float = 10.0) -> None:
+        self.window_sec = window_sec
+        self.events: deque[tuple[float, int]] = deque()
+        self.total_bytes = 0
+        self.total_messages = 0
+
+    def add(self, byte_count: int) -> None:
+        now = time.time()
+        self.events.append((now, max(0, byte_count)))
+        self.total_bytes += max(0, byte_count)
+        self.total_messages += 1
+        self._prune(now)
+
+    def snapshot(self) -> dict[str, float | int]:
+        now = time.time()
+        self._prune(now)
+        span = max(1.0, self.window_sec)
+        bytes_sum = sum(item[1] for item in self.events)
+        messages = len(self.events)
+        return {
+            "window_sec": round(self.window_sec, 1),
+            "messages_per_sec": round(messages / span, 2),
+            "bytes_per_sec": round(bytes_sum / span, 2),
+            "kbps": round((bytes_sum * 8.0) / span / 1000.0, 2),
+            "total_messages": self.total_messages,
+            "total_bytes": self.total_bytes,
+        }
+
+    def _prune(self, now: float) -> None:
+        threshold = now - self.window_sec
+        while self.events and self.events[0][0] < threshold:
+            self.events.popleft()
+
+
+class MatchRuntimeMetrics:
+    def __init__(self) -> None:
+        self.player_state_in = RollingMetricWindow()
+        self.damage_state_in = RollingMetricWindow()
+        self.match_state_out = RollingMetricWindow()
+        self.damage_state_out = RollingMetricWindow()
+        self.admin_state_out = RollingMetricWindow()
+        self.last_match_snapshot_bytes = 0
+        self.last_damage_payload_bytes = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "player_state_in": self.player_state_in.snapshot(),
+            "damage_state_in": self.damage_state_in.snapshot(),
+            "match_state_out": self.match_state_out.snapshot(),
+            "damage_state_out": self.damage_state_out.snapshot(),
+            "admin_state_out": self.admin_state_out.snapshot(),
+            "last_match_snapshot_bytes": self.last_match_snapshot_bytes,
+            "last_damage_payload_bytes": self.last_damage_payload_bytes,
+        }
+
+
 class RuntimeState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -82,6 +139,7 @@ class RuntimeState:
         self.countdown_tasks: dict[str, asyncio.Task[None]] = {}
         self.loading_tasks: dict[str, asyncio.Task[None]] = {}
         self.match_tasks: dict[str, asyncio.Task[None]] = {}
+        self.match_metrics: dict[str, MatchRuntimeMetrics] = {}
         self.maintenance_task: asyncio.Task[None] | None = asyncio.create_task(
             self._maintenance_loop(), name="maintenance"
         )
@@ -453,6 +511,9 @@ class RuntimeState:
         if message_type == "player_state":
             await self.apply_player_state(player_id, payload)
             return
+        if message_type == "damage_state":
+            await self.apply_damage_state(player_id, payload)
+            return
         if message_type == "ping":
             return
         await self._send_ws_error(player_id, "INVALID_REQUEST", "Unsupported message type")
@@ -507,7 +568,40 @@ class RuntimeState:
             player.position = self._coerce_vec3(state_payload.get("position"), player.position)
             player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
             player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
+            player.wheel_states = self._coerce_wheel_states(state_payload.get("wheel_states"), player.wheel_states)
             player.disconnected_announced = False
+            metrics = self._get_match_metrics(match_id)
+            metrics.player_state_in.add(self._estimate_payload_size(payload))
+
+    async def apply_damage_state(self, player_id: str, payload: dict[str, Any]) -> None:
+        match_id = str(payload.get("match_id", ""))
+        revision = int(payload.get("revision", 0))
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                raise match_not_found()
+            player = match.players.get(player_id)
+            if player is None:
+                raise invalid_request("Player is not part of the match")
+            if match.status != MatchStatus.running or revision <= player.damage_revision:
+                return
+
+            width = max(0, int(payload.get("width", 0)))
+            height = max(0, int(payload.get("height", 0)))
+            map_b64 = str(payload.get("map_b64", "") or "")
+            player.damage_revision = revision
+            player.damage_width = width
+            player.damage_height = height
+            player.damage_map_b64 = map_b64
+            player.last_damage_at = utcnow()
+            metrics = self._get_match_metrics(match_id)
+            payload_size = self._estimate_payload_size(payload)
+            metrics.damage_state_in.add(payload_size)
+            metrics.last_damage_payload_bytes = payload_size
+
+        await self._broadcast_match_players(match_id, payload)
+        metrics.damage_state_out.add(payload_size)
+        await self._broadcast_admin_match_change(match_id)
 
     async def _maintenance_loop(self) -> None:
         try:
@@ -584,6 +678,20 @@ class RuntimeState:
             z=read("z", fallback.z),
         )
 
+    @classmethod
+    def _coerce_wheel_states(cls, payload: Any, fallback: list[dict[str, Vec3]]) -> list[dict[str, Vec3]]:
+        if not isinstance(payload, list):
+            return list(fallback or [])
+
+        states: list[dict[str, Vec3]] = []
+        for item in payload[:4]:
+            if not isinstance(item, dict):
+                continue
+            position = cls._coerce_vec3(item.get("position"), Vec3())
+            rotation = cls._coerce_vec3(item.get("rotation"), Vec3())
+            states.append({"position": position, "rotation": rotation})
+        return states
+
     async def _maybe_start_lobby(self, lobby_id: str) -> None:
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
@@ -659,6 +767,7 @@ class RuntimeState:
                     load_deadline=utcnow() + timedelta(seconds=self.settings.match_load_timeout_sec),
                 )
                 self.matches_by_id[match_id] = match
+                self.match_metrics[match_id] = MatchRuntimeMetrics()
                 lobby.match_id = match_id
                 lobby.status = LobbyStatus.in_game
             logger.info("match_created lobby_id=%s match_id=%s", lobby_id, match_id)
@@ -746,6 +855,10 @@ class RuntimeState:
                 for event in disconnected_events:
                     await self._broadcast_match_players(match_id, event)
                 if snapshot:
+                    snapshot_bytes = self._estimate_payload_size(snapshot)
+                    metrics = self._get_match_metrics(match_id)
+                    metrics.match_state_out.add(snapshot_bytes)
+                    metrics.last_match_snapshot_bytes = snapshot_bytes
                     await self._broadcast_match_players(match_id, snapshot)
                     await self._broadcast_admin_match_state(match_id, snapshot)
         finally:
@@ -755,6 +868,20 @@ class RuntimeState:
     def _check_lobby_rate_limit(self, player_id: str) -> None:
         if not self.lobby_rate_limit.hit(player_id):
             raise invalid_request("Lobby action rate limit exceeded")
+
+    def _get_match_metrics(self, match_id: str) -> MatchRuntimeMetrics:
+        metrics = self.match_metrics.get(match_id)
+        if metrics is None:
+            metrics = MatchRuntimeMetrics()
+            self.match_metrics[match_id] = metrics
+        return metrics
+
+    @staticmethod
+    def _estimate_payload_size(payload: dict[str, Any]) -> int:
+        try:
+            return len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            return 0
 
     def _player_connection_state(self, player_id: str) -> ConnectionState:
         return ConnectionState.connected if player_id in self.player_connections else ConnectionState.disconnected
@@ -859,7 +986,13 @@ class RuntimeState:
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
-                    "car_config": player.car_config,
+                    "wheel_states": [
+                        {
+                            "position": state["position"].as_dict(),
+                            "rotation": state["rotation"].as_dict(),
+                        }
+                        for state in player.wheel_states
+                    ],
                 }
                 for player in match.players.values()
             ],
@@ -884,6 +1017,9 @@ class RuntimeState:
             "speed": round(speed, 3),
             "last_snapshot_at": player.last_snapshot_at.isoformat() + "Z",
             "car_config": player.car_config,
+            "wheel_state_count": len(player.wheel_states),
+            "damage_revision": player.damage_revision,
+            "damage_map_bytes": len(player.damage_map_b64.encode("utf-8")) if player.damage_map_b64 else 0,
         }
 
     def _serialize_admin_match_summary(self, match: Match) -> dict[str, Any]:
@@ -907,6 +1043,7 @@ class RuntimeState:
             "server_tick": match.server_tick,
             "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
             "raw_snapshot": raw_snapshot,
+            "telemetry": self._get_match_metrics(match.match_id).as_dict(),
         }
 
     def _get_map_spawn_points(self, map_id: str) -> list[SpawnPoint]:
@@ -1012,7 +1149,10 @@ class RuntimeState:
                 "match_id": match_id,
                 "server_tick": snapshot["server_tick"],
                 "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
+                "telemetry": self._get_match_metrics(match_id).as_dict(),
+                "raw_snapshot": snapshot,
             }
+        self._get_match_metrics(match_id).admin_state_out.add(self._estimate_payload_size(payload))
         await self._broadcast_to_admins(payload)
 
     async def _broadcast_to_players(self, player_ids: set[str], payload: dict[str, Any]) -> None:
