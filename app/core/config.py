@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     match_broadcast_rate: int = 30
     match_load_timeout_sec: int = 10
     disconnect_timeout_sec: int = 10
+    match_abandon_timeout_sec: int = 15
     lobby_ttl_seconds: int = 300
     maintenance_interval_sec: int = 5
     admin_token: str = ""
@@ -35,6 +36,9 @@ class Settings(BaseSettings):
     car_config_max_customizations: int = 128
     pagination_default_size: int = 50
     pagination_max_size: int = 100
+    simulation_service_url: str = ""
+    simulation_service_secret: str = ""
+    simulation_service_request_timeout_sec: float = 5.0
     docs_url: str | None = Field(default="/docs")
     redoc_url: str | None = Field(default="/redoc")
 

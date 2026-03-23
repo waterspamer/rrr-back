@@ -54,6 +54,7 @@ class LobbyPlayer:
     connection_state: ConnectionState
     joined_at: datetime
     car_config: dict[str, Any]
+    is_server_controlled: bool = False
 
 
 @dataclass(slots=True)
@@ -86,6 +87,7 @@ class MatchPlayer:
     spawn_point_id: str
     spawn_position: Vec3
     spawn_rotation: Vec3
+    is_server_controlled: bool = False
     position: Vec3 = field(default_factory=Vec3)
     rotation: Vec3 = field(default_factory=Vec3)
     velocity: Vec3 = field(default_factory=Vec3)
@@ -95,12 +97,19 @@ class MatchPlayer:
     server_received_time_ms: int = 0
     loaded: bool = False
     last_state_seq: int = -1
+    last_input_seq: int = -1
+    throttle: float = 0.0
+    steer: float = 0.0
+    brake: bool = False
+    handbrake: bool = False
+    nitro: bool = False
     last_snapshot_at: datetime = field(default_factory=datetime.utcnow)
     damage_revision: int = 0
     damage_width: int = 0
     damage_height: int = 0
     damage_map_b64: str | None = None
     last_damage_at: datetime | None = None
+    debug_state: dict[str, Any] = field(default_factory=dict)
     disconnected_announced: bool = False
 
 
@@ -116,3 +125,11 @@ class Match:
     created_at: datetime
     server_tick: int = 0
     load_deadline: datetime | None = None
+    room_id: str | None = None
+    room_status: str = "backend_fallback"
+    room_http_url: str | None = None
+    room_ws_url: str | None = None
+    room_token: str | None = None
+    last_simulation_snapshot: dict[str, Any] | None = None
+    recent_collisions: list[dict[str, Any]] = field(default_factory=list)
+    last_authoritative_collision_seq: int = 0

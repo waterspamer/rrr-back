@@ -25,6 +25,7 @@ from app.core.errors import (
     unauthorized,
 )
 from app.models import ConnectionState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
+from app.services.simulation_service import SimulationServiceClient
 
 
 logger = logging.getLogger("rrr.runtime")
@@ -105,29 +106,48 @@ class RollingMetricWindow:
 
 class MatchRuntimeMetrics:
     def __init__(self) -> None:
+        self.player_input_in = RollingMetricWindow()
         self.player_state_in = RollingMetricWindow()
+        self.simulation_input_out = RollingMetricWindow()
+        self.simulation_snapshot_in = RollingMetricWindow()
         self.damage_state_in = RollingMetricWindow()
+        self.collision_event_in = RollingMetricWindow()
         self.match_state_out = RollingMetricWindow()
         self.damage_state_out = RollingMetricWindow()
+        self.collision_event_out = RollingMetricWindow()
         self.admin_state_out = RollingMetricWindow()
         self.last_match_snapshot_bytes = 0
+        self.last_simulation_snapshot_bytes = 0
         self.last_damage_payload_bytes = 0
+        self.last_collision_payload_bytes = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "player_input_in": self.player_input_in.snapshot(),
             "player_state_in": self.player_state_in.snapshot(),
+            "simulation_input_out": self.simulation_input_out.snapshot(),
+            "simulation_snapshot_in": self.simulation_snapshot_in.snapshot(),
             "damage_state_in": self.damage_state_in.snapshot(),
+            "collision_event_in": self.collision_event_in.snapshot(),
             "match_state_out": self.match_state_out.snapshot(),
             "damage_state_out": self.damage_state_out.snapshot(),
+            "collision_event_out": self.collision_event_out.snapshot(),
             "admin_state_out": self.admin_state_out.snapshot(),
             "last_match_snapshot_bytes": self.last_match_snapshot_bytes,
+            "last_simulation_snapshot_bytes": self.last_simulation_snapshot_bytes,
             "last_damage_payload_bytes": self.last_damage_payload_bytes,
+            "last_collision_payload_bytes": self.last_collision_payload_bytes,
         }
 
 
 class RuntimeState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.simulation_service = SimulationServiceClient(
+            base_url=settings.simulation_service_url,
+            secret=settings.simulation_service_secret,
+            timeout_sec=settings.simulation_service_request_timeout_sec,
+        )
         self.lock = asyncio.Lock()
         self.sessions_by_token: dict[str, Session] = {}
         self.lobbies_by_id: dict[str, Lobby] = {}
@@ -159,6 +179,7 @@ class RuntimeState:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self.simulation_service.close()
 
     def stats(self) -> dict[str, int]:
         return {
@@ -366,6 +387,61 @@ class RuntimeState:
         await self._maybe_start_lobby(lobby_id)
         return {"updated": True}
 
+    async def start_solo(self, *, session_token: str, lobby_id: str) -> dict[str, Any]:
+        session = await self.resolve_session(session_token)
+        self._check_lobby_rate_limit(session.player_id)
+
+        async with self.lock:
+            lobby = self.lobbies_by_id.get(lobby_id)
+            if lobby is None:
+                raise lobby_not_found()
+            if lobby.status != LobbyStatus.waiting:
+                raise lobby_already_started()
+            if session.player_id not in lobby.players:
+                raise player_not_in_lobby()
+            if lobby.owner_player_id != session.player_id:
+                raise invalid_request("Only the lobby owner can start solo")
+
+            human_players = [player for player in lobby.players.values() if not player.is_server_controlled]
+            if len(human_players) != 1:
+                raise invalid_request("Start Solo requires exactly one human player in the lobby")
+            if any(player.is_server_controlled for player in lobby.players.values()):
+                raise invalid_request("Solo starter car already exists in this lobby")
+
+            owner_player = lobby.players[session.player_id]
+            if not owner_player.car_config:
+                raise invalid_request("Owner car config is required before solo start")
+
+            server_player = LobbyPlayer(
+                player_id=f"server_bot_{uuid4().hex[:12]}",
+                player_name="Idle Server Car",
+                connection_state=ConnectionState.connected,
+                joined_at=utcnow(),
+                car_config=json.loads(json.dumps(owner_player.car_config)),
+                is_server_controlled=True,
+            )
+            lobby.players[server_player.player_id] = server_player
+            lobby.status = LobbyStatus.starting
+            lobby_snapshot = self._serialize_lobby_detail(lobby)
+            match = self._create_match_locked(lobby)
+
+        logger.info("lobby_start_solo lobby_id=%s owner_player_id=%s match_id=%s", lobby_id, session.player_id, match.match_id)
+        await self._broadcast_lobby_event(
+            lobby_id,
+            {
+                "type": "lobby_starting",
+                "lobby_id": lobby_id,
+                "countdown_sec": 0,
+            },
+        )
+        await self._broadcast_lobby_snapshot(lobby_id, precomputed=lobby_snapshot)
+        await self._finish_match_creation(lobby_id, match)
+        return {
+            "started": True,
+            "match_id": match.match_id,
+            "server_player_id": server_player.player_id,
+        }
+
     async def get_match(self, match_id: str) -> dict[str, Any]:
         async with self.lock:
             match = self.matches_by_id.get(match_id)
@@ -397,6 +473,25 @@ class RuntimeState:
                 raise match_not_found()
             return self._serialize_admin_match_detail(match)
 
+    async def close_lobby(self, lobby_id: str, *, reason: str) -> dict[str, Any]:
+        async with self.lock:
+            close_result = self._close_lobby_locked(lobby_id, reason)
+        if close_result is None:
+            raise lobby_not_found()
+        await self._finalize_lobby_close(close_result)
+        logger.info(
+            "lobby_closed lobby_id=%s match_id=%s reason=%s",
+            close_result["lobby_id"],
+            close_result["match_id"],
+            reason,
+        )
+        return {
+            "lobby_id": close_result["lobby_id"],
+            "match_id": close_result["match_id"],
+            "closed": True,
+            "reason": reason,
+        }
+
     async def register_connection(self, token: str, websocket: WebSocket) -> Session:
         session = await self.resolve_session(token)
         await websocket.accept()
@@ -424,17 +519,26 @@ class RuntimeState:
         return session
 
     async def unregister_connection(self, player_id: str) -> None:
+        close_result: dict[str, Any] | None = None
         async with self.lock:
             self.player_connections.pop(player_id, None)
             lobby_id = self.player_to_lobby.get(player_id)
             match_id = None
             if lobby_id and lobby_id in self.lobbies_by_id and player_id in self.lobbies_by_id[lobby_id].players:
-                self.lobbies_by_id[lobby_id].players[player_id].connection_state = ConnectionState.disconnected
-                match_id = self.lobbies_by_id[lobby_id].match_id
-                self._cancel_countdown_if_not_ready_locked(self.lobbies_by_id[lobby_id])
+                lobby = self.lobbies_by_id[lobby_id]
+                lobby.players[player_id].connection_state = ConnectionState.disconnected
+                match_id = lobby.match_id
+                self._cancel_countdown_if_not_ready_locked(lobby)
+                if lobby.status in {LobbyStatus.waiting, LobbyStatus.starting} and self._all_human_players_disconnected_locked(lobby):
+                    close_result = self._close_lobby_locked(lobby_id, "all_players_disconnected")
+                    lobby_id = None
+                    match_id = close_result["match_id"] if close_result is not None else match_id
             for subscribers in self.lobby_subscribers.values():
                 subscribers.discard(player_id)
         logger.info("ws_disconnected player_id=%s", player_id)
+        if close_result is not None:
+            await self._finalize_lobby_close(close_result)
+            return
         if lobby_id:
             await self._broadcast_lobby_snapshot(lobby_id)
             await self._broadcast_admin_lobby_change(lobby_id)
@@ -509,6 +613,9 @@ class RuntimeState:
         if message_type == "match_loaded":
             await self.mark_match_loaded(player_id, str(payload.get("match_id", "")))
             return
+        if message_type == "player_input":
+            await self.apply_player_input(player_id, payload)
+            return
         if message_type == "player_state":
             await self.apply_player_state(player_id, payload)
             return
@@ -555,10 +662,44 @@ class RuntimeState:
             await self._broadcast_admin_lobby_change(lobby_id)
 
     async def apply_player_state(self, player_id: str, payload: dict[str, Any]) -> None:
+        input_payload = payload.get("input") or {}
+        if not input_payload:
+            input_payload = {
+                "throttle": 0.0,
+                "steer": 0.0,
+                "brake": False,
+                "handbrake": False,
+                "nitro": False,
+            }
+        await self._apply_player_input_payload(
+            player_id,
+            payload,
+            input_payload=input_payload,
+            state_payload=payload.get("state") or {},
+            metric_key="player_state",
+        )
+
+    async def apply_player_input(self, player_id: str, payload: dict[str, Any]) -> None:
+        await self._apply_player_input_payload(
+            player_id,
+            payload,
+            input_payload=payload.get("input") or {},
+            state_payload=payload.get("state") or {},
+            metric_key="player_input",
+        )
+
+    async def _apply_player_input_payload(
+        self,
+        player_id: str,
+        payload: dict[str, Any],
+        *,
+        input_payload: dict[str, Any],
+        state_payload: dict[str, Any],
+        metric_key: str,
+    ) -> None:
         match_id = str(payload.get("match_id", ""))
         seq = int(payload.get("seq", -1))
         client_time_ms = int(payload.get("client_time", 0) or 0)
-        state_payload = payload.get("state") or {}
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -566,24 +707,38 @@ class RuntimeState:
             player = match.players.get(player_id)
             if player is None:
                 raise invalid_request("Player is not part of the match")
-            if match.status != MatchStatus.running or seq <= player.last_state_seq:
+            if match.status != MatchStatus.running or seq <= player.last_input_seq:
                 return
-            player.last_state_seq = seq
+            player.last_input_seq = seq
+            authoritative_room = self._is_authoritative_room_status(match.room_status)
+            if state_payload:
+                player.last_state_seq = max(player.last_state_seq, seq)
             player.last_snapshot_at = utcnow()
             player.client_time_ms = client_time_ms
             player.server_received_time_ms = int(time.time() * 1000)
-            player.position = self._coerce_vec3(state_payload.get("position"), player.position)
-            player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
-            player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
-            player.angular_velocity = self._coerce_vec3(state_payload.get("angular_velocity"), player.angular_velocity)
-            player.wheel_states = self._coerce_wheel_states(state_payload.get("wheel_states"), player.wheel_states)
+            player.throttle = max(-1.0, min(1.0, float(input_payload.get("throttle", player.throttle) or 0.0)))
+            player.steer = max(-1.0, min(1.0, float(input_payload.get("steer", player.steer) or 0.0)))
+            player.brake = bool(input_payload.get("brake", player.brake))
+            player.handbrake = bool(input_payload.get("handbrake", player.handbrake))
+            player.nitro = bool(input_payload.get("nitro", player.nitro))
+            if state_payload and not authoritative_room:
+                player.position = self._coerce_vec3(state_payload.get("position"), player.position)
+                player.rotation = self._coerce_vec3(state_payload.get("rotation"), player.rotation)
+                player.velocity = self._coerce_vec3(state_payload.get("velocity"), player.velocity)
+                player.angular_velocity = self._coerce_vec3(state_payload.get("angular_velocity"), player.angular_velocity)
+                player.wheel_states = self._coerce_wheel_states(state_payload.get("wheel_states"), player.wheel_states)
             player.disconnected_announced = False
             metrics = self._get_match_metrics(match_id)
-            metrics.player_state_in.add(self._estimate_payload_size(payload))
+            payload_size = self._estimate_payload_size(payload)
+            metrics.player_input_in.add(payload_size)
+            if metric_key == "player_state":
+                metrics.player_state_in.add(payload_size)
 
     async def apply_damage_state(self, player_id: str, payload: dict[str, Any]) -> None:
         match_id = str(payload.get("match_id", ""))
         revision = int(payload.get("revision", 0))
+        metrics: MatchRuntimeMetrics | None = None
+        payload_size = 0
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -591,6 +746,8 @@ class RuntimeState:
             player = match.players.get(player_id)
             if player is None:
                 raise invalid_request("Player is not part of the match")
+            if self._is_authoritative_room_status(match.room_status):
+                return
             if match.status != MatchStatus.running or revision <= player.damage_revision:
                 return
 
@@ -608,7 +765,8 @@ class RuntimeState:
             metrics.last_damage_payload_bytes = payload_size
 
         await self._broadcast_match_players(match_id, payload)
-        metrics.damage_state_out.add(payload_size)
+        if metrics is not None:
+            metrics.damage_state_out.add(payload_size)
         await self._broadcast_admin_match_change(match_id)
 
     async def apply_collision_event(self, player_id: str, payload: dict[str, Any]) -> None:
@@ -617,6 +775,7 @@ class RuntimeState:
         secondary_player_id = str(payload.get("secondary_player_id", ""))
         collision_pair_key = self._build_collision_pair_key(match_id, primary_player_id, secondary_player_id)
         now = time.time()
+        metrics: MatchRuntimeMetrics | None = None
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -625,6 +784,8 @@ class RuntimeState:
             secondary = match.players.get(secondary_player_id)
             if primary is None or secondary is None:
                 raise invalid_request("Collision participants are not part of the match")
+            if self._is_authoritative_room_status(match.room_status):
+                return
             if primary.player_id == secondary.player_id:
                 raise invalid_request("Collision participants must be different players")
             if player_id != primary_player_id:
@@ -633,12 +794,17 @@ class RuntimeState:
             if now - last_collision_at < 0.12:
                 return
             self.recent_collision_pairs[collision_pair_key] = now
+            metrics = self._get_match_metrics(match_id)
 
         world_point = self._coerce_vec3(payload.get("world_point"), Vec3())
         world_normal = self._coerce_vec3(payload.get("world_normal"), Vec3(0.0, 1.0, 0.0))
         relative_velocity = self._coerce_vec3(payload.get("relative_velocity"), Vec3())
         impulse_vector = self._coerce_vec3(payload.get("impulse_vector"), Vec3())
         impulse_magnitude = float(payload.get("impulse_magnitude", 0.0) or 0.0)
+        payload_size = self._estimate_payload_size(payload)
+        if metrics is not None:
+            metrics.collision_event_in.add(payload_size)
+            metrics.last_collision_payload_bytes = payload_size
 
         await self._broadcast_match_players(
             match_id,
@@ -654,6 +820,8 @@ class RuntimeState:
                 "impulse_magnitude": impulse_magnitude,
             },
         )
+        if metrics is not None:
+            metrics.collision_event_out.add(payload_size)
         await self._broadcast_match_players(
             match_id,
             {
@@ -668,6 +836,8 @@ class RuntimeState:
                 "impulse_magnitude": impulse_magnitude,
             },
         )
+        if metrics is not None:
+            metrics.collision_event_out.add(payload_size)
 
     async def _maintenance_loop(self) -> None:
         try:
@@ -678,7 +848,7 @@ class RuntimeState:
             raise
 
     async def _expire_lobbies(self) -> None:
-        expired: list[tuple[str, set[str]]] = []
+        expired: list[dict[str, Any]] = []
         async with self.lock:
             now = utcnow()
             for lobby_id, lobby in list(self.lobbies_by_id.items()):
@@ -686,25 +856,99 @@ class RuntimeState:
                     continue
                 if lobby.expires_at > now:
                     continue
+                close_result = self._close_lobby_locked(lobby_id, "timeout")
+                if close_result is not None:
+                    expired.append(close_result)
 
-                task = self.countdown_tasks.pop(lobby_id, None)
-                if task is not None:
-                    task.cancel()
-                player_ids = set(lobby.players.keys())
-                for player_id in player_ids:
-                    self.player_to_lobby.pop(player_id, None)
-                self.lobby_subscribers.pop(lobby_id, None)
-                self.lobbies_by_id.pop(lobby_id, None)
-                expired.append((lobby_id, player_ids))
+        for close_result in expired:
+            logger.info("lobby_expired lobby_id=%s", close_result["lobby_id"])
+            await self._finalize_lobby_close(close_result)
 
-        for lobby_id, player_ids in expired:
-            logger.info("lobby_expired lobby_id=%s", lobby_id)
+    @staticmethod
+    def _all_human_players_disconnected_locked(lobby: Lobby) -> bool:
+        human_players = [player for player in lobby.players.values() if not player.is_server_controlled]
+        if not human_players:
+            return False
+        return all(player.connection_state == ConnectionState.disconnected for player in human_players)
+
+    def _close_lobby_locked(self, lobby_id: str, reason: str) -> dict[str, Any] | None:
+        lobby = self.lobbies_by_id.pop(lobby_id, None)
+        if lobby is None:
+            return None
+
+        countdown_task = self.countdown_tasks.pop(lobby_id, None)
+        loading_task = None
+        match_task = None
+        match_id = lobby.match_id
+        match_player_ids: set[str] = set()
+        server_tick = 0
+        if match_id:
+            loading_task = self.loading_tasks.pop(match_id, None)
+            match_task = self.match_tasks.pop(match_id, None)
+            match = self.matches_by_id.pop(match_id, None)
+            if match is not None:
+                match_player_ids = set(match.players.keys())
+                server_tick = match.server_tick
+                self.match_metrics.pop(match_id, None)
+        for player_id in lobby.players:
+            self.player_to_lobby.pop(player_id, None)
+        self.lobby_subscribers.pop(lobby_id, None)
+        if match_id:
+            prefix = f"{match_id}:"
+            self.recent_collision_pairs = {
+                key: value for key, value in self.recent_collision_pairs.items() if not key.startswith(prefix)
+            }
+        return {
+            "lobby_id": lobby_id,
+            "match_id": match_id,
+            "reason": reason,
+            "player_ids": set(lobby.players.keys()),
+            "match_player_ids": match_player_ids,
+            "server_tick": server_tick,
+            "countdown_task": countdown_task,
+            "loading_task": loading_task,
+            "match_task": match_task,
+        }
+
+    async def _finalize_lobby_close(self, close_result: dict[str, Any]) -> None:
+        countdown_task = close_result.get("countdown_task")
+        loading_task = close_result.get("loading_task")
+        match_task = close_result.get("match_task")
+        current_task = asyncio.current_task()
+        for task in (countdown_task, loading_task, match_task):
+            if task is not None and task is not current_task:
+                task.cancel()
+
+        match_id = close_result.get("match_id")
+        if match_id:
+            try:
+                await self.simulation_service.release_room(match_id)
+            except Exception:
+                logger.warning("simulation_room_release_failed match_id=%s", match_id, exc_info=True)
+
+        player_ids = set(close_result.get("player_ids") or set())
+        match_player_ids = set(close_result.get("match_player_ids") or set())
+        reason = str(close_result.get("reason", "closed") or "closed")
+
+        if match_id and match_player_ids:
+            await self._broadcast_to_players(
+                match_player_ids,
+                {
+                    "type": "match_finished",
+                    "match_id": match_id,
+                    "reason": reason,
+                    "server_tick": int(close_result.get("server_tick", 0) or 0),
+                },
+            )
+
+        if player_ids:
             await self._broadcast_to_players(
                 player_ids,
-                {"type": "lobby_closed", "lobby_id": lobby_id, "reason": "timeout"},
+                {"type": "lobby_closed", "lobby_id": close_result["lobby_id"], "reason": reason},
             )
-        if expired:
-            await self._broadcast_admin_lobbies_snapshot()
+
+        await self._broadcast_admin_lobbies_snapshot()
+        await self._broadcast_admin_matches_snapshot()
 
     def _cancel_countdown_if_not_ready_locked(self, lobby: Lobby) -> bool:
         if lobby is None or lobby.status != LobbyStatus.starting:
@@ -725,7 +969,10 @@ class RuntimeState:
             return False
         if not all(player.car_config for player in lobby.players.values()):
             return False
-        return all(player_id in self.player_connections for player_id in lobby.players)
+        return all(
+            player.is_server_controlled or player.player_id in self.player_connections
+            for player in lobby.players.values()
+        )
 
     @staticmethod
     def _coerce_vec3(payload: dict[str, Any] | None, fallback: Vec3) -> Vec3:
@@ -786,76 +1033,93 @@ class RuntimeState:
     async def _countdown_to_match(self, lobby_id: str) -> None:
         try:
             await asyncio.sleep(self.settings.auto_start_countdown_sec)
+            match: Match | None = None
             async with self.lock:
                 lobby = self.lobbies_by_id.get(lobby_id)
                 if lobby is None or lobby.status != LobbyStatus.starting:
                     return
-                spawn_assignments = self._build_spawn_assignments(lobby)
-                match_id = f"match_{uuid4().hex[:12]}"
-                players = {
-                    player_id: MatchPlayer(
-                        player_id=player.player_id,
-                        player_name=player.player_name,
-                        car_config=player.car_config,
-                        authority_order=index,
-                        spawn_point_id=spawn_assignments[player_id].spawn_point_id,
-                        spawn_position=Vec3(
-                            spawn_assignments[player_id].position.x,
-                            spawn_assignments[player_id].position.y,
-                            spawn_assignments[player_id].position.z,
-                        ),
-                        spawn_rotation=Vec3(
-                            spawn_assignments[player_id].rotation.x,
-                            spawn_assignments[player_id].rotation.y,
-                            spawn_assignments[player_id].rotation.z,
-                        ),
-                        position=Vec3(
-                            spawn_assignments[player_id].position.x,
-                            spawn_assignments[player_id].position.y,
-                            spawn_assignments[player_id].position.z,
-                        ),
-                        rotation=Vec3(
-                            spawn_assignments[player_id].rotation.x,
-                            spawn_assignments[player_id].rotation.y,
-                            spawn_assignments[player_id].rotation.z,
-                        ),
-                    )
-                    for index, (player_id, player) in enumerate(sorted(lobby.players.items(), key=lambda item: (item[1].joined_at, item[0])))
-                }
-                match = Match(
-                    match_id=match_id,
-                    lobby_id=lobby_id,
-                    status=MatchStatus.starting,
-                    map_id=lobby.map_id,
-                    tick_rate=self.settings.match_tick_rate,
-                    broadcast_rate=self.settings.match_broadcast_rate,
-                    players=players,
-                    created_at=utcnow(),
-                    load_deadline=utcnow() + timedelta(seconds=self.settings.match_load_timeout_sec),
-                )
-                self.matches_by_id[match_id] = match
-                self.match_metrics[match_id] = MatchRuntimeMetrics()
-                lobby.match_id = match_id
-                lobby.status = LobbyStatus.in_game
-            logger.info("match_created lobby_id=%s match_id=%s", lobby_id, match_id)
-            await self._broadcast_lobby_event(
-                lobby_id,
-                {
-                    "type": "match_created",
-                    "match_id": match_id,
-                    "lobby_id": lobby_id,
-                    "map_id": match.map_id,
-                    "players": [self._serialize_match_player_info(match, player) for player in match.players.values()],
-                },
-            )
-            await self._broadcast_admin_lobby_change(lobby_id)
-            await self._broadcast_admin_match_change(match_id)
-            loading_task = asyncio.create_task(self._await_match_loaded(match_id), name=f"load:{match_id}")
-            async with self.lock:
-                self.loading_tasks[match_id] = loading_task
+                match = self._create_match_locked(lobby)
+            if match is not None:
+                logger.info("match_created lobby_id=%s match_id=%s", lobby_id, match.match_id)
+                await self._finish_match_creation(lobby_id, match)
         finally:
             async with self.lock:
                 self.countdown_tasks.pop(lobby_id, None)
+
+    def _create_match_locked(self, lobby: Lobby) -> Match:
+        spawn_assignments = self._build_spawn_assignments(lobby)
+        match_id = f"match_{uuid4().hex[:12]}"
+        players = {
+            player_id: MatchPlayer(
+                player_id=player.player_id,
+                player_name=player.player_name,
+                car_config=json.loads(json.dumps(player.car_config)),
+                authority_order=index,
+                spawn_point_id=spawn_assignments[player_id].spawn_point_id,
+                spawn_position=Vec3(
+                    spawn_assignments[player_id].position.x,
+                    spawn_assignments[player_id].position.y,
+                    spawn_assignments[player_id].position.z,
+                ),
+                spawn_rotation=Vec3(
+                    spawn_assignments[player_id].rotation.x,
+                    spawn_assignments[player_id].rotation.y,
+                    spawn_assignments[player_id].rotation.z,
+                ),
+                is_server_controlled=player.is_server_controlled,
+                position=Vec3(
+                    spawn_assignments[player_id].position.x,
+                    spawn_assignments[player_id].position.y,
+                    spawn_assignments[player_id].position.z,
+                ),
+                rotation=Vec3(
+                    spawn_assignments[player_id].rotation.x,
+                    spawn_assignments[player_id].rotation.y,
+                    spawn_assignments[player_id].rotation.z,
+                ),
+                loaded=player.is_server_controlled,
+            )
+            for index, (player_id, player) in enumerate(sorted(lobby.players.items(), key=lambda item: (item[1].joined_at, item[0])))
+        }
+        match = Match(
+            match_id=match_id,
+            lobby_id=lobby.lobby_id,
+            status=MatchStatus.starting,
+            map_id=lobby.map_id,
+            tick_rate=self.settings.match_tick_rate,
+            broadcast_rate=self.settings.match_broadcast_rate,
+            players=players,
+            created_at=utcnow(),
+            load_deadline=utcnow() + timedelta(seconds=self.settings.match_load_timeout_sec),
+        )
+        self.matches_by_id[match_id] = match
+        self.match_metrics[match_id] = MatchRuntimeMetrics()
+        lobby.match_id = match_id
+        lobby.status = LobbyStatus.in_game
+        return match
+
+    async def _finish_match_creation(self, lobby_id: str, match: Match) -> None:
+        await self._assign_simulation_room(match.match_id)
+        await self._broadcast_lobby_event(
+            lobby_id,
+            {
+                "type": "match_created",
+                "match_id": match.match_id,
+                "lobby_id": lobby_id,
+                "map_id": match.map_id,
+                "room_id": match.room_id,
+                "room_status": match.room_status,
+                "room_http_url": match.room_http_url,
+                "room_ws_url": match.room_ws_url,
+                "room_token": match.room_token,
+                "players": [self._serialize_match_player_info(match, player) for player in match.players.values()],
+            },
+        )
+        await self._broadcast_admin_lobby_change(lobby_id)
+        await self._broadcast_admin_match_change(match.match_id)
+        loading_task = asyncio.create_task(self._await_match_loaded(match.match_id), name=f"load:{match.match_id}")
+        async with self.lock:
+            self.loading_tasks[match.match_id] = loading_task
 
     async def _await_match_loaded(self, match_id: str) -> None:
         try:
@@ -901,13 +1165,56 @@ class RuntimeState:
             while True:
                 await asyncio.sleep(tick_interval)
                 snapshot = None
+                close_result: dict[str, Any] | None = None
                 disconnected_events: list[dict[str, Any]] = []
+                authoritative_damage_payloads: list[dict[str, Any]] = []
+                authoritative_collision_payloads: list[dict[str, Any]] = []
+                simulation_match_id: str | None = None
+                simulation_input_payload: dict[str, Any] | None = None
+                use_simulation = False
+                metrics = self._get_match_metrics(match_id)
                 async with self.lock:
                     match = self.matches_by_id.get(match_id)
                     if match is None or match.status != MatchStatus.running:
                         return
-                    match.server_tick += 1
+                    if self._is_authoritative_room_status(match.room_status) and self.simulation_service.enabled:
+                        simulation_match_id = match.match_id
+                        simulation_input_payload = self._build_simulation_input_batch(match)
+                        use_simulation = True
+                    else:
+                        match.server_tick += 1
+
+                if use_simulation and simulation_match_id and simulation_input_payload is not None:
+                    try:
+                        input_bytes = self._estimate_payload_size(simulation_input_payload)
+                        metrics.simulation_input_out.add(input_bytes)
+                        await self.simulation_service.apply_inputs(simulation_match_id, simulation_input_payload)
+                        simulation_snapshot = await self.simulation_service.get_snapshot(simulation_match_id)
+                        snapshot_bytes = self._estimate_payload_size(simulation_snapshot or {})
+                        metrics.simulation_snapshot_in.add(snapshot_bytes)
+                        metrics.last_simulation_snapshot_bytes = snapshot_bytes
+                        async with self.lock:
+                            match = self.matches_by_id.get(match_id)
+                            if match is None or match.status != MatchStatus.running:
+                                return
+                            (
+                                authoritative_damage_payloads,
+                                authoritative_collision_payloads,
+                            ) = self._apply_simulation_snapshot_locked(match, simulation_snapshot or {})
+                    except Exception:
+                        logger.warning("simulation_snapshot_pull_failed match_id=%s", match_id, exc_info=True)
+                        async with self.lock:
+                            match = self.matches_by_id.get(match_id)
+                            if match is not None and match.status == MatchStatus.running:
+                                match.room_status = "simulation_unavailable"
+                                match.server_tick += 1
+
+                async with self.lock:
+                    match = self.matches_by_id.get(match_id)
+                    if match is None or match.status != MatchStatus.running:
+                        return
                     now = utcnow()
+                    all_players_disconnected = True
                     for player in match.players.values():
                         if (
                             now - player.last_snapshot_at >= timedelta(seconds=self.settings.disconnect_timeout_sec)
@@ -917,13 +1224,35 @@ class RuntimeState:
                             disconnected_events.append(
                                 {"type": "player_disconnected", "match_id": match_id, "player_id": player.player_id}
                             )
-                    if match.server_tick % broadcast_every == 0:
+                        if (
+                            player.player_id in self.player_connections
+                            or now - player.last_snapshot_at < timedelta(seconds=self.settings.match_abandon_timeout_sec)
+                        ):
+                            all_players_disconnected = False
+                    if all_players_disconnected:
+                        close_result = self._close_lobby_locked(match.lobby_id, "abandoned")
+                        logger.info("match_finished match_id=%s reason=abandoned", match_id)
+                    elif match.server_tick % broadcast_every == 0:
                         snapshot = self._serialize_match_state(match)
                 for event in disconnected_events:
                     await self._broadcast_match_players(match_id, event)
+                for damage_payload in authoritative_damage_payloads:
+                    damage_bytes = self._estimate_payload_size(damage_payload)
+                    metrics.damage_state_in.add(damage_bytes)
+                    metrics.damage_state_out.add(damage_bytes)
+                    metrics.last_damage_payload_bytes = damage_bytes
+                    await self._broadcast_match_players(match_id, damage_payload)
+                for collision_payload in authoritative_collision_payloads:
+                    collision_bytes = self._estimate_payload_size(collision_payload)
+                    metrics.collision_event_in.add(collision_bytes)
+                    metrics.collision_event_out.add(collision_bytes)
+                    metrics.last_collision_payload_bytes = collision_bytes
+                    await self._broadcast_match_players(match_id, collision_payload)
+                if close_result is not None:
+                    await self._finalize_lobby_close(close_result)
+                    return
                 if snapshot:
                     snapshot_bytes = self._estimate_payload_size(snapshot)
-                    metrics = self._get_match_metrics(match_id)
                     metrics.match_state_out.add(snapshot_bytes)
                     metrics.last_match_snapshot_bytes = snapshot_bytes
                     await self._broadcast_match_players(match_id, snapshot)
@@ -931,6 +1260,287 @@ class RuntimeState:
         finally:
             async with self.lock:
                 self.match_tasks.pop(match_id, None)
+            try:
+                await self.simulation_service.release_room(match_id)
+            except Exception:
+                logger.warning("simulation_room_release_failed match_id=%s", match_id, exc_info=True)
+
+    async def _assign_simulation_room(self, match_id: str) -> None:
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                return
+            payload = self._build_simulation_room_request(match)
+
+        if not self.simulation_service.enabled:
+            async with self.lock:
+                match = self.matches_by_id.get(match_id)
+                if match is not None:
+                    match.room_status = "backend_fallback"
+            return
+
+        try:
+            response = await self.simulation_service.reserve_room(payload)
+        except Exception:
+            logger.warning("simulation_room_reserve_failed match_id=%s", match_id, exc_info=True)
+            async with self.lock:
+                match = self.matches_by_id.get(match_id)
+                if match is not None:
+                    match.room_status = "allocation_failed"
+            return
+
+        if not response:
+            async with self.lock:
+                match = self.matches_by_id.get(match_id)
+                if match is not None:
+                    match.room_status = "allocation_failed"
+            return
+
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                return
+            match.room_id = str(response.get("room_id", "") or match_id)
+            match.room_status = str(response.get("status", "allocated") or "allocated")
+            match.room_http_url = str(response.get("room_http_url", "") or "") or None
+            match.room_ws_url = str(response.get("room_ws_url", "") or "") or None
+            match.room_token = str(response.get("room_token", "") or "") or None
+
+    def _build_simulation_room_request(self, match: Match) -> dict[str, Any]:
+        return {
+            "match_id": match.match_id,
+            "map_id": match.map_id,
+            "tick_rate": match.tick_rate,
+            "broadcast_rate": match.broadcast_rate,
+            "players": [
+                {
+                    "player_id": player.player_id,
+                    "player_name": player.player_name,
+                    "authority_order": player.authority_order,
+                    "spawn_point_id": player.spawn_point_id,
+                    "spawn_position": player.spawn_position.as_dict(),
+                    "spawn_rotation": player.spawn_rotation.as_dict(),
+                    "car_config": player.car_config,
+                }
+                for player in match.players.values()
+            ],
+        }
+
+    def _build_simulation_input_batch(self, match: Match) -> dict[str, Any]:
+        return {
+            "players": [
+                {
+                    "player_id": player.player_id,
+                    "seq": player.last_input_seq,
+                    "client_time": player.client_time_ms,
+                    "input": {
+                        "throttle": round(player.throttle, 4),
+                        "steer": round(player.steer, 4),
+                        "brake": player.brake,
+                        "handbrake": player.handbrake,
+                        "nitro": player.nitro,
+                    },
+                }
+                for player in match.players.values()
+            ]
+        }
+
+    @staticmethod
+    def _is_authoritative_room_status(room_status: str | None) -> bool:
+        return (room_status or "").lower() in {"allocated", "ready", "reserved", "simulating"}
+
+    def _apply_simulation_snapshot_locked(self, match: Match, snapshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        damage_payloads: list[dict[str, Any]] = []
+        collision_payloads: list[dict[str, Any]] = []
+        if not snapshot:
+            return damage_payloads, collision_payloads
+
+        match.last_simulation_snapshot = snapshot
+
+        try:
+            match.server_tick = max(match.server_tick, int(snapshot.get("server_tick", match.server_tick) or match.server_tick))
+        except (TypeError, ValueError):
+            pass
+
+        snapshot_status = str(snapshot.get("status", "") or "").strip()
+        if snapshot_status:
+            match.room_status = snapshot_status
+        elif self._is_authoritative_room_status(match.room_status):
+            match.room_status = "simulating"
+
+        players_payload = snapshot.get("players")
+        if isinstance(players_payload, list):
+            for item in players_payload:
+                if not isinstance(item, dict):
+                    continue
+                player_id = str(item.get("player_id", "") or "")
+                if not player_id:
+                    continue
+                player = match.players.get(player_id)
+                if player is None:
+                    continue
+
+                try:
+                    player.last_input_seq = max(player.last_input_seq, int(item.get("ack_input_seq", player.last_input_seq)))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    player.client_time_ms = int(item.get("client_time", player.client_time_ms) or player.client_time_ms)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    player.server_received_time_ms = int(
+                        item.get("server_received_time", player.server_received_time_ms) or player.server_received_time_ms
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+                input_payload = item.get("input")
+                if isinstance(input_payload, dict):
+                    player.throttle = max(-1.0, min(1.0, float(input_payload.get("throttle", player.throttle) or 0.0)))
+                    player.steer = max(-1.0, min(1.0, float(input_payload.get("steer", player.steer) or 0.0)))
+                    player.brake = bool(input_payload.get("brake", player.brake))
+                    player.handbrake = bool(input_payload.get("handbrake", player.handbrake))
+                    player.nitro = bool(input_payload.get("nitro", player.nitro))
+
+                player.position = self._coerce_vec3(item.get("position"), player.position)
+                player.rotation = self._coerce_vec3(item.get("rotation"), player.rotation)
+                player.velocity = self._coerce_vec3(item.get("velocity"), player.velocity)
+                player.angular_velocity = self._coerce_vec3(item.get("angular_velocity"), player.angular_velocity)
+                player.wheel_states = self._coerce_wheel_states(item.get("wheel_states"), player.wheel_states)
+                player.debug_state = item.get("debug") if isinstance(item.get("debug"), dict) else {}
+
+        damage_states_payload = snapshot.get("damage_states")
+        if isinstance(damage_states_payload, list):
+            for item in damage_states_payload:
+                if not isinstance(item, dict):
+                    continue
+                player_id = str(item.get("player_id", "") or "")
+                if not player_id:
+                    continue
+                player = match.players.get(player_id)
+                if player is None:
+                    continue
+
+                try:
+                    revision = int(item.get("revision", 0) or 0)
+                except (TypeError, ValueError):
+                    revision = 0
+                if revision <= player.damage_revision:
+                    continue
+
+                try:
+                    width = max(0, int(item.get("width", 0) or 0))
+                except (TypeError, ValueError):
+                    width = 0
+                try:
+                    height = max(0, int(item.get("height", 0) or 0))
+                except (TypeError, ValueError):
+                    height = 0
+                map_b64 = str(item.get("map_b64", "") or "")
+                player.damage_revision = revision
+                player.damage_width = width
+                player.damage_height = height
+                player.damage_map_b64 = map_b64
+                player.last_damage_at = utcnow()
+
+                world_point = item.get("world_point")
+                world_normal = item.get("world_normal")
+                damage_payloads.append(
+                    {
+                        "type": "damage_state",
+                        "match_id": match.match_id,
+                        "player_id": player_id,
+                        "revision": revision,
+                        "width": width,
+                        "height": height,
+                        "map_b64": map_b64,
+                        "world_point": self._coerce_vec3(world_point, Vec3()).as_dict() if isinstance(world_point, dict) else None,
+                        "world_normal": self._coerce_vec3(world_normal, Vec3(0.0, 1.0, 0.0)).as_dict()
+                        if isinstance(world_normal, dict)
+                        else None,
+                    }
+                )
+
+        collisions_payload = snapshot.get("collisions")
+        if isinstance(collisions_payload, list):
+            snapshot_server_time = int(snapshot.get("server_time", 0) or 0)
+            for item in collisions_payload:
+                if not isinstance(item, dict):
+                    continue
+                primary_player_id = str(item.get("primary_player_id", "") or "")
+                secondary_player_id = str(item.get("secondary_player_id", "") or "")
+                if not primary_player_id or not secondary_player_id:
+                    continue
+                if primary_player_id not in match.players or secondary_player_id not in match.players:
+                    continue
+                if primary_player_id == secondary_player_id:
+                    continue
+
+                try:
+                    sequence = int(item.get("sequence", 0) or 0)
+                except (TypeError, ValueError):
+                    sequence = 0
+                if sequence > 0 and sequence <= match.last_authoritative_collision_seq:
+                    continue
+
+                pair_key = self._build_collision_pair_key(match.match_id, primary_player_id, secondary_player_id)
+                event_server_time = int(item.get("server_time", snapshot_server_time) or snapshot_server_time or 0)
+                event_time_sec = (event_server_time / 1000.0) if event_server_time > 0 else time.time()
+                last_collision_at = self.recent_collision_pairs.get(pair_key, 0.0)
+                if event_time_sec - last_collision_at < 0.12:
+                    continue
+                self.recent_collision_pairs[pair_key] = event_time_sec
+
+                if sequence > 0:
+                    match.last_authoritative_collision_seq = max(match.last_authoritative_collision_seq, sequence)
+
+                world_point = self._coerce_vec3(item.get("world_point"), Vec3())
+                world_normal = self._coerce_vec3(item.get("world_normal"), Vec3(0.0, 1.0, 0.0))
+                relative_velocity = self._coerce_vec3(item.get("relative_velocity"), Vec3())
+                impulse_vector = self._coerce_vec3(item.get("impulse_vector"), Vec3())
+                try:
+                    impulse_magnitude = float(item.get("impulse_magnitude", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    impulse_magnitude = 0.0
+                base_payload = {
+                    "type": "collision_event",
+                    "match_id": match.match_id,
+                    "primary_player_id": primary_player_id,
+                    "secondary_player_id": secondary_player_id,
+                    "world_point": world_point.as_dict(),
+                    "world_normal": world_normal.as_dict(),
+                    "relative_velocity": relative_velocity.as_dict(),
+                    "impulse_vector": impulse_vector.as_dict(),
+                    "impulse_magnitude": impulse_magnitude,
+                }
+                match.recent_collisions.append(
+                    {
+                        **base_payload,
+                        "sequence": sequence,
+                        "server_time": event_server_time,
+                        "server_tick": match.server_tick,
+                    }
+                )
+                if len(match.recent_collisions) > 24:
+                    match.recent_collisions = match.recent_collisions[-24:]
+
+                collision_payloads.append(base_payload)
+                collision_payloads.append(
+                    {
+                        "type": "collision_event",
+                        "match_id": match.match_id,
+                        "primary_player_id": secondary_player_id,
+                        "secondary_player_id": primary_player_id,
+                        "world_point": world_point.as_dict(),
+                        "world_normal": Vec3(-world_normal.x, -world_normal.y, -world_normal.z).as_dict(),
+                        "relative_velocity": Vec3(-relative_velocity.x, -relative_velocity.y, -relative_velocity.z).as_dict(),
+                        "impulse_vector": Vec3(-impulse_vector.x, -impulse_vector.y, -impulse_vector.z).as_dict(),
+                        "impulse_magnitude": impulse_magnitude,
+                    }
+                )
+
+        return damage_payloads, collision_payloads
 
     def _check_lobby_rate_limit(self, player_id: str) -> None:
         if not self.lobby_rate_limit.hit(player_id):
@@ -968,6 +1578,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": player.connection_state.value,
+            "is_server_controlled": player.is_server_controlled,
             "joined_at": player.joined_at.isoformat() + "Z",
         }
         if include_car_config:
@@ -1001,6 +1612,11 @@ class RuntimeState:
             "status": match.status.value,
             "map_id": match.map_id,
             "tick_rate": match.tick_rate,
+            "room_id": match.room_id,
+            "room_status": match.room_status,
+            "room_http_url": match.room_http_url,
+            "room_ws_url": match.room_ws_url,
+            "room_token": match.room_token,
             "players": [self._serialize_match_player_info(match, player) for player in match.players.values()],
         }
 
@@ -1013,6 +1629,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": connection_state,
+            "is_server_controlled": player.is_server_controlled,
             "authority_order": player.authority_order,
             "spawn_point_id": player.spawn_point_id,
             "spawn_position": player.spawn_position.as_dict(),
@@ -1025,6 +1642,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": player.connection_state.value,
+            "is_server_controlled": player.is_server_controlled,
             "joined_at": player.joined_at.isoformat() + "Z",
             "car_config": player.car_config,
             "loadout_display_name": player.car_config.get("loadout_display_name"),
@@ -1051,8 +1669,16 @@ class RuntimeState:
             "players": [
                 {
                     "player_id": player.player_id,
+                    "ack_input_seq": player.last_input_seq,
                     "client_time": player.client_time_ms,
                     "server_received_time": player.server_received_time_ms,
+                    "input": {
+                        "throttle": round(player.throttle, 3),
+                        "steer": round(player.steer, 3),
+                        "brake": player.brake,
+                        "handbrake": player.handbrake,
+                        "nitro": player.nitro,
+                    },
                     "position": player.position.as_dict(),
                     "rotation": player.rotation.as_dict(),
                     "velocity": player.velocity.as_dict(),
@@ -1079,6 +1705,7 @@ class RuntimeState:
             "player_id": player.player_id,
             "player_name": player.player_name,
             "connection_state": connection_state,
+            "is_server_controlled": player.is_server_controlled,
             "authority_order": player.authority_order,
             "spawn_point_id": player.spawn_point_id,
             "spawn_position": player.spawn_position.as_dict(),
@@ -1091,6 +1718,12 @@ class RuntimeState:
             "last_snapshot_at": player.last_snapshot_at.isoformat() + "Z",
             "client_time_ms": player.client_time_ms,
             "server_received_time_ms": player.server_received_time_ms,
+            "last_input_seq": player.last_input_seq,
+            "throttle": round(player.throttle, 3),
+            "steer": round(player.steer, 3),
+            "brake": player.brake,
+            "handbrake": player.handbrake,
+            "nitro": player.nitro,
             "car_config": player.car_config,
             "wheel_state_count": len(player.wheel_states),
             "damage_revision": player.damage_revision,
@@ -1099,6 +1732,7 @@ class RuntimeState:
             "damage_map_bytes": len(player.damage_map_b64.encode("utf-8")) if player.damage_map_b64 else 0,
             "damage_map_b64": player.damage_map_b64,
             "last_damage_at": player.last_damage_at.isoformat() + "Z" if player.last_damage_at else None,
+            "debug": player.debug_state,
         }
 
     def _serialize_admin_match_summary(self, match: Match) -> dict[str, Any]:
@@ -1109,10 +1743,12 @@ class RuntimeState:
             "map_id": match.map_id,
             "player_count": len(match.players),
             "server_tick": match.server_tick,
+            "room_id": match.room_id,
+            "room_status": match.room_status,
         }
 
     def _serialize_admin_match_detail(self, match: Match) -> dict[str, Any]:
-        raw_snapshot = self._serialize_match_state(match)
+        raw_snapshot = match.last_simulation_snapshot or self._serialize_match_state(match)
         return {
             "match_id": match.match_id,
             "lobby_id": match.lobby_id,
@@ -1120,7 +1756,13 @@ class RuntimeState:
             "map_id": match.map_id,
             "tick_rate": match.tick_rate,
             "server_tick": match.server_tick,
+            "room_id": match.room_id,
+            "room_status": match.room_status,
+            "room_http_url": match.room_http_url,
+            "room_ws_url": match.room_ws_url,
+            "room_token": match.room_token,
             "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
+            "recent_collisions": list(match.recent_collisions),
             "raw_snapshot": raw_snapshot,
             "telemetry": self._get_match_metrics(match.match_id).as_dict(),
         }
@@ -1223,7 +1865,7 @@ class RuntimeState:
                 match = self.matches_by_id.get(match_id)
                 if match is None:
                     return
-                snapshot = self._serialize_match_state(match)
+                snapshot = match.last_simulation_snapshot or self._serialize_match_state(match)
         async with self.lock:
             match = self.matches_by_id.get(match_id)
             if match is None:
@@ -1232,7 +1874,10 @@ class RuntimeState:
                 "type": "admin_match_state",
                 "match_id": match_id,
                 "server_tick": snapshot["server_tick"],
+                "room_id": match.room_id,
+                "room_status": match.room_status,
                 "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
+                "recent_collisions": list(match.recent_collisions),
                 "telemetry": self._get_match_metrics(match_id).as_dict(),
                 "raw_snapshot": snapshot,
             }

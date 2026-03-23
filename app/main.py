@@ -14,6 +14,7 @@ from app.api.deps import get_admin_token, get_bearer_token, get_runtime
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
 from app.schemas import (
+    AdminLobbyCloseResponse,
     AdminLobbiesResponse,
     AdminLobbyResponse,
     AdminMatchDetailResponse,
@@ -25,6 +26,7 @@ from app.schemas import (
     LobbyDetailResponse,
     LobbyJoinRequest,
     LobbyJoinResponse,
+    LobbyStartSoloResponse,
     MatchInfoResponse,
     PaginatedLobbiesResponse,
     SessionGuestCreateRequest,
@@ -151,6 +153,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             car_config=payload.car_config.model_dump(mode="json"),
         )
 
+    @app.post(f"{settings.api_prefix}/lobbies/{{lobby_id}}/start-solo", response_model=LobbyStartSoloResponse)
+    async def start_lobby_solo(
+        lobby_id: str,
+        token: str = Depends(get_bearer_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        return await runtime.start_solo(session_token=token, lobby_id=lobby_id)
+
     @app.post(f"{settings.api_prefix}/lobbies/{{lobby_id}}/leave", response_model=SimpleSuccessResponse)
     async def leave_lobby(
         lobby_id: str,
@@ -192,6 +202,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
         return await runtime.get_admin_lobby(lobby_id)
+
+    @app.delete(f"{settings.api_prefix}/admin/lobbies/{{lobby_id}}", response_model=AdminLobbyCloseResponse)
+    async def close_admin_lobby(
+        lobby_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.close_lobby(lobby_id, reason="admin_killed")
 
     @app.get(f"{settings.api_prefix}/admin/matches", response_model=AdminMatchesResponse)
     async def get_admin_matches(

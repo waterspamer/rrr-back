@@ -218,10 +218,17 @@ def test_websocket_match_flow() -> None:
 
             ws1.send_json(
                 {
-                    "type": "player_state",
+                    "type": "player_input",
                     "match_id": match_id,
                     "seq": 1,
                     "client_time": int(time.time() * 1000),
+                    "input": {
+                        "throttle": 1.0,
+                        "steer": 0.35,
+                        "brake": False,
+                        "handbrake": False,
+                        "nitro": True,
+                    },
                     "state": {
                         "position": {"x": 10.0, "y": 0.5, "z": 4.0},
                         "rotation": {"x": 0.0, "y": 18.0, "z": 0.0},
@@ -237,10 +244,17 @@ def test_websocket_match_flow() -> None:
             )
             ws2.send_json(
                 {
-                    "type": "player_state",
+                    "type": "player_input",
                     "match_id": match_id,
                     "seq": 1,
                     "client_time": int(time.time() * 1000),
+                    "input": {
+                        "throttle": 0.8,
+                        "steer": -0.2,
+                        "brake": False,
+                        "handbrake": False,
+                        "nitro": False,
+                    },
                     "state": {
                         "position": {"x": -12.0, "y": 0.5, "z": 7.0},
                         "rotation": {"x": 0.0, "y": -11.0, "z": 0.0},
@@ -264,10 +278,56 @@ def test_websocket_match_flow() -> None:
                         got_match_state = True
                         assert len(message["players"]) == 2
                         assert any(player["position"]["x"] == 10.0 for player in message["players"])
+                        assert all("ack_input_seq" in player for player in message["players"])
+                        assert all("input" in player for player in message["players"])
                         assert all("car_config" not in player for player in message["players"])
                         assert all(len(player["wheel_states"]) == 4 for player in message["players"])
                         break
             assert got_match_state
+
+
+def test_start_solo_creates_match_with_idle_server_car() -> None:
+    with build_client() as client:
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_Solo"}).json()
+
+        with client.websocket_connect(f"/api/v1/ws?session_token={session['session_token']}") as ws:
+            assert ws.receive_json()["type"] == "welcome"
+
+            create = client.post(
+                "/api/v1/lobbies",
+                headers={"Authorization": f"Bearer {session['session_token']}"},
+                json={"name": "Solo Lobby", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+            )
+            assert create.status_code == 201
+            lobby_id = create.json()["lobby_id"]
+
+            ws.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            assert ws.receive_json()["type"] == "lobby_snapshot"
+
+            start_solo = client.post(
+                f"/api/v1/lobbies/{lobby_id}/start-solo",
+                headers={"Authorization": f"Bearer {session['session_token']}"},
+            )
+            assert start_solo.status_code == 200
+            solo_payload = start_solo.json()
+            assert solo_payload["started"] is True
+            assert solo_payload["match_id"].startswith("match_")
+            assert solo_payload["server_player_id"].startswith("server_bot_")
+
+            match_created = receive_until(ws, {"match_created"}, max_messages=16)
+            assert match_created["match_id"] == solo_payload["match_id"]
+            assert len(match_created["players"]) == 2
+            assert sum(1 for player in match_created["players"] if player["is_server_controlled"]) == 1
+            assert any(player["player_id"] == solo_payload["server_player_id"] for player in match_created["players"])
+
+            match_info = client.get(f"/api/v1/matches/{solo_payload['match_id']}")
+            assert match_info.status_code == 200
+            assert len(match_info.json()["players"]) == 2
+            assert sum(1 for player in match_info.json()["players"] if player["is_server_controlled"]) == 1
+
+            ws.send_json({"type": "match_loaded", "match_id": solo_payload["match_id"]})
+            started = receive_until(ws, {"match_started"}, max_messages=32)
+            assert started["match_id"] == solo_payload["match_id"]
 
 
 def test_customizations_roundtrip_via_rest_and_realtime() -> None:
@@ -456,10 +516,17 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
 
                 ws1.send_json(
                     {
-                        "type": "player_state",
+                        "type": "player_input",
                         "match_id": match_id,
                         "seq": 1,
                         "client_time": int(time.time() * 1000),
+                        "input": {
+                            "throttle": 1.0,
+                            "steer": 0.5,
+                            "brake": False,
+                            "handbrake": False,
+                            "nitro": False,
+                        },
                         "state": {
                             "position": {"x": 6.0, "y": 0.5, "z": 3.0},
                             "rotation": {"x": 0.0, "y": 24.0, "z": 0.0},
@@ -469,10 +536,17 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 )
                 ws2.send_json(
                     {
-                        "type": "player_state",
+                        "type": "player_input",
                         "match_id": match_id,
                         "seq": 1,
                         "client_time": int(time.time() * 1000),
+                        "input": {
+                            "throttle": 0.7,
+                            "steer": -0.3,
+                            "brake": False,
+                            "handbrake": False,
+                            "nitro": True,
+                        },
                         "state": {
                             "position": {"x": -4.0, "y": 0.5, "z": 8.0},
                             "rotation": {"x": 0.0, "y": -9.0, "z": 0.0},
@@ -487,6 +561,7 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 assert admin_state["server_tick"] >= 1
                 assert all(player["connection_state"] == "in_game" for player in admin_state["players"])
                 assert "telemetry" in admin_state
+                assert "player_input_in" in admin_state["telemetry"]
                 assert "match_state_out" in admin_state["telemetry"]
 
                 damage_payload = {
@@ -511,3 +586,287 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 detail_payload = admin_match_detail.json()
                 assert detail_payload["telemetry"]["damage_state_in"]["total_messages"] >= 1
                 assert any(player["damage_revision"] == 1 for player in detail_payload["players"])
+
+
+def test_authoritative_simulation_snapshot_overrides_client_state() -> None:
+    with build_client(simulation_service_url="http://simulation.local") as client:
+        runtime = client.app.state.runtime
+        captured_batches: list[dict[str, object]] = []
+
+        async def fake_reserve_room(payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "room_id": payload["match_id"],
+                "status": "simulating",
+                "room_http_url": f"http://simulation.local/api/v1/rooms/{payload['match_id']}",
+                "room_ws_url": "",
+                "room_token": "room-token",
+            }
+
+        async def fake_apply_inputs(match_id: str, payload: dict[str, object]) -> dict[str, object]:
+            captured_batches.append(payload)
+            return {
+                "match_id": match_id,
+                "status": "simulating",
+                "accepted_players": len(payload.get("players", [])),
+                "server_tick": 1,
+            }
+
+        async def fake_get_snapshot(match_id: str) -> dict[str, object]:
+            async with runtime.lock:
+                match = runtime.matches_by_id[match_id]
+                players = list(match.players.values())
+            return {
+                "room_id": match_id,
+                "match_id": match_id,
+                "status": "simulating",
+                "server_tick": 3,
+                "server_time": int(time.time() * 1000),
+                "players": [
+                    {
+                        "player_id": players[0].player_id,
+                        "ack_input_seq": players[0].last_input_seq,
+                        "client_time": players[0].client_time_ms,
+                        "server_received_time": players[0].server_received_time_ms,
+                        "input": {
+                            "throttle": players[0].throttle,
+                            "steer": players[0].steer,
+                            "brake": players[0].brake,
+                            "handbrake": players[0].handbrake,
+                            "nitro": players[0].nitro,
+                        },
+                        "position": {"x": 55.0, "y": 0.5, "z": 11.0},
+                        "rotation": {"x": 0.0, "y": 22.0, "z": 0.0},
+                        "velocity": {"x": 0.0, "y": 0.0, "z": 18.0},
+                        "angular_velocity": {"x": 0.0, "y": 0.4, "z": 0.0},
+                        "wheel_states": [
+                            {"position": {"x": -0.8, "y": 0.1, "z": 1.2}, "rotation": {"x": 12.0, "y": 18.0, "z": 90.0}},
+                            {"position": {"x": 0.8, "y": 0.12, "z": 1.2}, "rotation": {"x": 13.0, "y": 18.0, "z": 90.0}},
+                            {"position": {"x": -0.8, "y": 0.08, "z": -1.2}, "rotation": {"x": 20.0, "y": 0.0, "z": 90.0}},
+                            {"position": {"x": 0.8, "y": 0.1, "z": -1.2}, "rotation": {"x": 19.0, "y": 0.0, "z": 90.0}},
+                        ],
+                    },
+                    {
+                        "player_id": players[1].player_id,
+                        "ack_input_seq": players[1].last_input_seq,
+                        "client_time": players[1].client_time_ms,
+                        "server_received_time": players[1].server_received_time_ms,
+                        "input": {
+                            "throttle": players[1].throttle,
+                            "steer": players[1].steer,
+                            "brake": players[1].brake,
+                            "handbrake": players[1].handbrake,
+                            "nitro": players[1].nitro,
+                        },
+                        "position": {"x": -44.0, "y": 0.5, "z": 7.5},
+                        "rotation": {"x": 0.0, "y": -13.0, "z": 0.0},
+                        "velocity": {"x": -1.5, "y": 0.0, "z": 12.0},
+                        "angular_velocity": {"x": 0.0, "y": -0.3, "z": 0.0},
+                        "wheel_states": [
+                            {"position": {"x": -0.9, "y": 0.11, "z": 1.25}, "rotation": {"x": 8.0, "y": -11.0, "z": 90.0}},
+                            {"position": {"x": 0.9, "y": 0.1, "z": 1.25}, "rotation": {"x": 9.0, "y": -11.0, "z": 90.0}},
+                            {"position": {"x": -0.9, "y": 0.09, "z": -1.25}, "rotation": {"x": 16.0, "y": 0.0, "z": 90.0}},
+                            {"position": {"x": 0.9, "y": 0.09, "z": -1.25}, "rotation": {"x": 17.0, "y": 0.0, "z": 90.0}},
+                        ],
+                    },
+                ],
+            }
+
+        async def fake_release_room(match_id: str) -> bool:
+            return True
+
+        runtime.simulation_service.reserve_room = fake_reserve_room
+        runtime.simulation_service.apply_inputs = fake_apply_inputs
+        runtime.simulation_service.get_snapshot = fake_get_snapshot
+        runtime.simulation_service.release_room = fake_release_room
+
+        session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_7001"}).json()
+        session_2 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_7002"}).json()
+
+        with client.websocket_connect(f"/api/v1/ws?session_token={session_1['session_token']}") as ws1, client.websocket_connect(
+            f"/api/v1/ws?session_token={session_2['session_token']}"
+        ) as ws2:
+            ws1.receive_json()
+            ws2.receive_json()
+
+            create = client.post(
+                "/api/v1/lobbies",
+                headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                json={"name": "Authoritative Room", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+            )
+            assert create.status_code == 201
+            lobby_id = create.json()["lobby_id"]
+
+            ws1.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            ws2.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            ws1.receive_json()
+            ws2.receive_json()
+
+            join = client.post(
+                f"/api/v1/lobbies/{lobby_id}/join",
+                headers={"Authorization": f"Bearer {session_2['session_token']}"},
+                json={"car_config": sample_car_config("Mustang")},
+            )
+            assert join.status_code == 200
+
+            match_created = receive_until(ws1, {"match_created"}, max_messages=16)
+            match_id = match_created["match_id"]
+            assert match_created["room_status"] == "simulating"
+
+            receive_until(ws2, {"match_created"}, max_messages=16)
+
+            ws1.send_json({"type": "match_loaded", "match_id": match_id})
+            ws2.send_json({"type": "match_loaded", "match_id": match_id})
+            receive_until(ws1, {"match_started", "match_state"}, max_messages=16)
+            receive_until(ws2, {"match_started", "match_state"}, max_messages=16)
+
+            ws1.send_json(
+                {
+                    "type": "player_input",
+                    "match_id": match_id,
+                    "seq": 1,
+                    "client_time": int(time.time() * 1000),
+                    "input": {"throttle": 1.0, "steer": 0.25, "brake": False, "handbrake": False, "nitro": True},
+                    "state": {"position": {"x": 999.0, "y": 0.5, "z": 999.0}},
+                }
+            )
+            ws2.send_json(
+                {
+                    "type": "player_input",
+                    "match_id": match_id,
+                    "seq": 1,
+                    "client_time": int(time.time() * 1000),
+                    "input": {"throttle": 0.7, "steer": -0.3, "brake": False, "handbrake": False, "nitro": False},
+                    "state": {"position": {"x": -999.0, "y": 0.5, "z": -999.0}},
+                }
+            )
+
+            snapshot_message = receive_until(ws1, {"match_state"}, max_messages=32)
+            assert captured_batches
+            assert snapshot_message["server_tick"] >= 3
+            authoritative_positions = {player["player_id"]: player["position"]["x"] for player in snapshot_message["players"]}
+            assert authoritative_positions[session_1["player_id"]] == 55.0
+            assert authoritative_positions[session_2["player_id"]] == -44.0
+            assert authoritative_positions[session_1["player_id"]] != 999.0
+            assert authoritative_positions[session_2["player_id"]] != -999.0
+
+
+def test_abandoned_match_finishes_and_releases_simulation_room() -> None:
+    with build_client(
+        simulation_service_url="http://simulation.local",
+        disconnect_timeout_sec=1,
+        match_abandon_timeout_sec=1,
+    ) as client:
+        runtime = client.app.state.runtime
+        released_match_ids: list[str] = []
+
+        async def fake_reserve_room(payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "room_id": payload["match_id"],
+                "status": "simulating",
+                "room_http_url": f"http://simulation.local/api/v1/rooms/{payload['match_id']}",
+                "room_ws_url": "",
+                "room_token": "room-token",
+            }
+
+        async def fake_apply_inputs(match_id: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "match_id": match_id,
+                "status": "simulating",
+                "accepted_players": len(payload.get("players", [])),
+                "server_tick": 1,
+            }
+
+        async def fake_get_snapshot(match_id: str) -> dict[str, object]:
+            async with runtime.lock:
+                match = runtime.matches_by_id[match_id]
+                players = list(match.players.values())
+            return {
+                "room_id": match_id,
+                "match_id": match_id,
+                "status": "simulating",
+                "server_tick": max(1, len(released_match_ids) + 1),
+                "server_time": int(time.time() * 1000),
+                "players": [
+                    {
+                        "player_id": player.player_id,
+                        "ack_input_seq": player.last_input_seq,
+                        "client_time": player.client_time_ms,
+                        "server_received_time": player.server_received_time_ms,
+                        "input": {
+                            "throttle": player.throttle,
+                            "steer": player.steer,
+                            "brake": player.brake,
+                            "handbrake": player.handbrake,
+                            "nitro": player.nitro,
+                        },
+                        "position": player.position.as_dict(),
+                        "rotation": player.rotation.as_dict(),
+                        "velocity": player.velocity.as_dict(),
+                        "angular_velocity": player.angular_velocity.as_dict(),
+                        "wheel_states": [],
+                    }
+                    for player in players
+                ],
+            }
+
+        async def fake_release_room(match_id: str) -> bool:
+            released_match_ids.append(match_id)
+            return True
+
+        runtime.simulation_service.reserve_room = fake_reserve_room
+        runtime.simulation_service.apply_inputs = fake_apply_inputs
+        runtime.simulation_service.get_snapshot = fake_get_snapshot
+        runtime.simulation_service.release_room = fake_release_room
+
+        session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_8001"}).json()
+        session_2 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_8002"}).json()
+
+        with client.websocket_connect(f"/api/v1/ws?session_token={session_1['session_token']}") as ws1, client.websocket_connect(
+            f"/api/v1/ws?session_token={session_2['session_token']}"
+        ) as ws2:
+            ws1.receive_json()
+            ws2.receive_json()
+
+            create = client.post(
+                "/api/v1/lobbies",
+                headers={"Authorization": f"Bearer {session_1['session_token']}"},
+                json={"name": "Abandon Match", "map_id": "city_default", "max_players": 2, "car_config": sample_car_config("Cooper")},
+            )
+            assert create.status_code == 201
+            lobby_id = create.json()["lobby_id"]
+
+            ws1.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            ws2.send_json({"type": "subscribe_lobby", "lobby_id": lobby_id})
+            ws1.receive_json()
+            ws2.receive_json()
+
+            join = client.post(
+                f"/api/v1/lobbies/{lobby_id}/join",
+                headers={"Authorization": f"Bearer {session_2['session_token']}"},
+                json={"car_config": sample_car_config("Mustang")},
+            )
+            assert join.status_code == 200
+
+            match_created = receive_until(ws1, {"match_created"}, max_messages=16)
+            match_id = match_created["match_id"]
+            receive_until(ws2, {"match_created"}, max_messages=16)
+
+            ws1.send_json({"type": "match_loaded", "match_id": match_id})
+            ws2.send_json({"type": "match_loaded", "match_id": match_id})
+            receive_until(ws1, {"match_started", "match_state"}, max_messages=16)
+            receive_until(ws2, {"match_started", "match_state"}, max_messages=16)
+
+        deadline = time.time() + 3
+        match_response = None
+        while time.time() < deadline:
+            match_response = client.get(f"/api/v1/matches/{match_id}")
+            if match_response.status_code == 404:
+                break
+            time.sleep(0.1)
+
+        assert match_response is not None
+        assert match_response.status_code == 404
+        assert match_id in released_match_ids
+
+        lobby_response = client.get(f"/api/v1/lobbies/{lobby_id}")
+        assert lobby_response.status_code == 404

@@ -88,6 +88,7 @@ class LobbyPlayerResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    is_server_controlled: bool = False
     joined_at: str | None = None
     car_config: dict[str, Any] | None = None
 
@@ -105,6 +106,7 @@ class LobbyDetailResponse(LobbySummaryResponse):
     owner_player_id: str
     players: list[LobbyPlayerResponse]
     created_at: str
+    expires_at: str | None = None
     match_id: str | None = None
 
 
@@ -119,9 +121,23 @@ class LobbyJoinResponse(BaseModel):
     joined: bool
 
 
+class LobbyStartSoloResponse(BaseModel):
+    started: bool
+    match_id: str
+    server_player_id: str
+
+
 class SimpleSuccessResponse(BaseModel):
     updated: bool | None = None
     left: bool | None = None
+    closed: bool | None = None
+
+
+class AdminLobbyCloseResponse(BaseModel):
+    lobby_id: str
+    match_id: str | None = None
+    closed: bool
+    reason: str
 
 
 class PaginatedLobbiesResponse(BaseModel):
@@ -139,6 +155,7 @@ class MatchPlayerInfoResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    is_server_controlled: bool = False
     authority_order: int
     spawn_point_id: str
     spawn_position: Vec3Response
@@ -152,6 +169,11 @@ class MatchInfoResponse(BaseModel):
     status: str
     map_id: str
     tick_rate: int
+    room_id: str | None = None
+    room_status: str | None = None
+    room_http_url: str | None = None
+    room_ws_url: str | None = None
+    room_token: str | None = None
     players: list[MatchPlayerInfoResponse]
 
 
@@ -166,6 +188,7 @@ class AdminLobbyPlayerResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    is_server_controlled: bool = False
     joined_at: str
     car_config: dict[str, Any]
     loadout_display_name: str | None = None
@@ -182,6 +205,7 @@ class AdminLobbyResponse(BaseModel):
     current_players: int
     owner_player_id: str
     created_at: str
+    expires_at: str | None = None
     match_id: str | None = None
     players: list[AdminLobbyPlayerResponse]
 
@@ -194,6 +218,7 @@ class AdminMatchPlayerResponse(BaseModel):
     player_id: str
     player_name: str
     connection_state: str
+    is_server_controlled: bool = False
     authority_order: int
     spawn_point_id: str
     spawn_position: dict[str, float]
@@ -206,6 +231,12 @@ class AdminMatchPlayerResponse(BaseModel):
     last_snapshot_at: str
     client_time_ms: int = 0
     server_received_time_ms: int = 0
+    last_input_seq: int = 0
+    throttle: float = 0.0
+    steer: float = 0.0
+    brake: bool = False
+    handbrake: bool = False
+    nitro: bool = False
     car_config: dict[str, Any]
     wheel_state_count: int = 0
     damage_revision: int = 0
@@ -214,6 +245,7 @@ class AdminMatchPlayerResponse(BaseModel):
     damage_map_bytes: int = 0
     damage_map_b64: str | None = None
     last_damage_at: str | None = None
+    debug: dict[str, Any] = Field(default_factory=dict)
 
 
 class AdminMatchSummaryResponse(BaseModel):
@@ -223,6 +255,8 @@ class AdminMatchSummaryResponse(BaseModel):
     map_id: str
     player_count: int
     server_tick: int
+    room_id: str | None = None
+    room_status: str | None = None
 
 
 class AdminMatchesResponse(BaseModel):
@@ -236,6 +270,12 @@ class AdminMatchDetailResponse(BaseModel):
     map_id: str
     tick_rate: int
     server_tick: int
+    room_id: str | None = None
+    room_status: str | None = None
+    room_http_url: str | None = None
+    room_ws_url: str | None = None
+    room_token: str | None = None
     players: list[AdminMatchPlayerResponse]
+    recent_collisions: list[dict[str, Any]] = Field(default_factory=list)
     raw_snapshot: dict[str, Any]
     telemetry: dict[str, Any]
