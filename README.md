@@ -29,6 +29,7 @@ Client to server:
 - `unsubscribe_lobby`
 - `match_loaded`
 - `player_input`
+- `player_state` (legacy compatibility)
 - `ping`
 
 Server to client:
@@ -122,5 +123,7 @@ sh ./deploy/redeploy.sh
 
 - Single instance only
 - In-memory state only
-- Simplified kinematic simulation
+- `player_input` is the primary realtime contract
+- When `simulation_service_url` is configured, backend pushes inputs into Unity dedicated simulation and broadcasts authoritative snapshots back to clients
+- If the simulation service is unavailable, backend degrades to client-state fallback instead of dropping the match
 - No PostgreSQL, Redis, replay, or progression

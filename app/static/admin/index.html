@@ -93,7 +93,10 @@
             <section class="panel" id="lobbyDetailPanel">
                 <div class="panel-head">
                     <h2>Lobby Detail</h2>
-                    <span id="lobbyStatusPill" class="status-pill neutral">idle</span>
+                    <div class="panel-actions">
+                        <span id="lobbyStatusPill" class="status-pill neutral">idle</span>
+                        <button id="killLobbyButton" type="button" class="danger" disabled>Kill lobby</button>
+                    </div>
                 </div>
                 <div id="lobbyDetail" class="empty-state">Select a lobby to inspect players and car configs.</div>
             </section>
@@ -116,6 +119,9 @@
                                 <th>z</th>
                                 <th>rot_y</th>
                                 <th>speed</th>
+                                <th>ack</th>
+                                <th>grounded</th>
+                                <th>damage</th>
                                 <th>connection</th>
                             </tr>
                             </thead>
@@ -127,6 +133,11 @@
                         <span class="badge">live relay preview</span>
                     </div>
                     <div id="damageMaps" class="damage-grid empty-state">Select a match to inspect damage textures.</div>
+                    <div class="panel-head nested-head">
+                        <h2>Recent Collisions</h2>
+                        <span class="badge">authoritative relay</span>
+                    </div>
+                    <div id="collisionFeed" class="stack empty-state">Select a match to inspect collision events.</div>
                 </div>
                 <div class="panel map-panel">
                     <div class="panel-head">

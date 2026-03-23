@@ -34,12 +34,14 @@
         serverTickLabel: document.getElementById("serverTickLabel"),
         serverTickMeta: document.getElementById("serverTickMeta"),
         lobbyStatusPill: document.getElementById("lobbyStatusPill"),
+        killLobbyButton: document.getElementById("killLobbyButton"),
         matchStatusPill: document.getElementById("matchStatusPill"),
         lobbyDetail: document.getElementById("lobbyDetail"),
         matchSummary: document.getElementById("matchSummary"),
         networkStats: document.getElementById("networkStats"),
         playersTable: document.getElementById("playersTable"),
         damageMaps: document.getElementById("damageMaps"),
+        collisionFeed: document.getElementById("collisionFeed"),
         rawSnapshot: document.getElementById("rawSnapshot"),
         canvas: document.getElementById("matchCanvas"),
     };
@@ -51,6 +53,7 @@
 
         elements.applyTokenButton.addEventListener("click", applyToken);
         elements.refreshButton.addEventListener("click", refreshAll);
+        elements.killLobbyButton.addEventListener("click", killSelectedLobby);
         window.addEventListener("beforeunload", closeSocket);
 
         refreshAll().finally(connectSocket);
@@ -127,12 +130,19 @@
         }
     }
 
-    async function apiGet(path) {
+    async function apiRequest(path, options) {
         const url = new URL(path, window.location.origin);
         if (state.token) {
             url.searchParams.set("token", state.token);
         }
-        const response = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+        const response = await fetch(url.toString(), {
+            method: options && options.method ? options.method : "GET",
+            headers: {
+                Accept: "application/json",
+                ...(options && options.headers ? options.headers : {}),
+            },
+            body: options && options.body ? options.body : undefined,
+        });
         if (!response.ok) {
             let message = `${response.status} ${response.statusText}`;
             try {
@@ -143,7 +153,42 @@
             }
             throw new Error(message);
         }
+        if (response.status === 204) {
+            return null;
+        }
         return response.json();
+    }
+
+    async function apiGet(path) {
+        return apiRequest(path, { method: "GET" });
+    }
+
+    async function apiDelete(path) {
+        return apiRequest(path, { method: "DELETE" });
+    }
+
+    async function killSelectedLobby() {
+        if (!state.selectedLobbyId) {
+            return;
+        }
+
+        const lobby = state.selectedLobby;
+        const label = lobby ? `${lobby.name} (${lobby.lobby_id})` : state.selectedLobbyId;
+        if (!window.confirm(`Kill lobby ${label}?`)) {
+            return;
+        }
+
+        elements.killLobbyButton.disabled = true;
+        setStatus("syncing", `Closing lobby ${state.selectedLobbyId}`);
+        try {
+            await apiDelete(`/api/v1/admin/lobbies/${state.selectedLobbyId}`);
+            await refreshAll();
+            setStatus("connected", `Lobby ${label} closed`);
+        } catch (error) {
+            renderError(error);
+        } finally {
+            render();
+        }
     }
 
     function connectSocket() {
@@ -223,6 +268,8 @@
                 upsertById(state.matches, {
                     match_id: payload.match_id,
                     server_tick: payload.server_tick,
+                    room_id: payload.room_id,
+                    room_status: payload.room_status,
                 }, "match_id");
                 if (state.selectedMatchId === payload.match_id) {
                     const previous = state.selectedMatch || {};
@@ -230,7 +277,10 @@
                         ...previous,
                         match_id: payload.match_id,
                         server_tick: payload.server_tick,
+                        room_id: payload.room_id || previous.room_id || null,
+                        room_status: payload.room_status || previous.room_status || null,
                         players: payload.players || [],
+                        recent_collisions: payload.recent_collisions || previous.recent_collisions || [],
                         telemetry: payload.telemetry || previous.telemetry || null,
                         raw_snapshot: payload.raw_snapshot || payload,
                     };
@@ -370,6 +420,7 @@
         elements.selectedLobbyLabel.textContent = lobby ? lobby.lobby_id : "none";
         elements.selectedLobbyMeta.textContent = lobby ? `${lobby.name} on ${lobby.map_id}` : "pick a lobby from the list";
         renderPill(elements.lobbyStatusPill, lobby ? lobby.status : "idle");
+        elements.killLobbyButton.disabled = !lobby;
 
         if (!lobby) {
             elements.lobbyDetail.className = "empty-state";
@@ -386,6 +437,7 @@
             `<div class="small">owner</div><strong>${escapeHtml(lobby.owner_player_id)}</strong>`,
             `<div class="small">slots</div><strong>${lobby.current_players}/${lobby.max_players}</strong>`,
             `<div class="small">match</div><strong>${escapeHtml(lobby.match_id || "none")}</strong>`,
+            `<div class="small">expires_at</div><strong>${escapeHtml(lobby.expires_at || "n/a")}</strong>`,
         ].join(" ");
         wrapper.appendChild(summary);
 
@@ -441,6 +493,8 @@
             elements.playersTable.replaceChildren();
             elements.damageMaps.className = "damage-grid empty-state";
             elements.damageMaps.textContent = "Select a match to inspect damage textures.";
+            elements.collisionFeed.className = "stack empty-state";
+            elements.collisionFeed.textContent = "Select a match to inspect collision events.";
             elements.rawSnapshot.textContent = "{}";
             drawMap([]);
             return;
@@ -451,6 +505,8 @@
             <div class="small">match_id</div><strong>${escapeHtml(match.match_id)}</strong>
             <div class="small">map / tick_rate</div><strong>${escapeHtml(match.map_id || "n/a")} / ${escapeHtml(String(match.tick_rate || "n/a"))}</strong>
             <div class="small">players</div><strong>${escapeHtml(String((match.players || []).length))}</strong>
+            <div class="small">room</div><strong>${escapeHtml(match.room_status || "n/a")}</strong>
+            <div class="small">room_id</div><strong>${escapeHtml(match.room_id || "n/a")}</strong>
         `;
 
         elements.playersTable.replaceChildren();
@@ -464,12 +520,16 @@
                 <td>${formatNumber(player.position && player.position.z)}</td>
                 <td>${formatNumber(player.rotation && player.rotation.y)}</td>
                 <td>${formatNumber(player.speed)}</td>
+                <td>${escapeHtml(String(player.last_input_seq != null ? player.last_input_seq : "n/a"))}</td>
+                <td>${escapeHtml(String(player.debug && player.debug.grounded_wheels != null ? player.debug.grounded_wheels : "n/a"))}</td>
+                <td>${escapeHtml(String(player.damage_revision || 0))}</td>
                 <td>${escapeHtml(player.connection_state || "unknown")}</td>
             `;
             elements.playersTable.appendChild(tr);
         });
 
         renderDamageMaps(match.players || []);
+        renderCollisionFeed(match.recent_collisions || []);
         elements.rawSnapshot.textContent = JSON.stringify(match.raw_snapshot || match, null, 2);
         drawMap(match.players || []);
     }
@@ -517,6 +577,35 @@
         elements.damageMaps.replaceChildren(...cards);
     }
 
+    function renderCollisionFeed(collisions) {
+        if (!Array.isArray(collisions) || !collisions.length) {
+            elements.collisionFeed.className = "stack empty-state";
+            elements.collisionFeed.textContent = "No collision events yet.";
+            return;
+        }
+
+        const cards = collisions.slice().reverse().slice(0, 12).map(function (collision) {
+            const card = document.createElement("article");
+            card.className = "telemetry-card";
+            const point = collision.world_point || {};
+            card.innerHTML = `
+                <div class="item-title">
+                    <span>${escapeHtml(collision.primary_player_id || "unknown")} -> ${escapeHtml(collision.secondary_player_id || "unknown")}</span>
+                    <span class="badge">${escapeHtml(String(collision.sequence != null ? collision.sequence : "evt"))}</span>
+                </div>
+                <div class="config-list">
+                    <div><div class="small">impulse</div><strong>${formatNumber(collision.impulse_magnitude)}</strong></div>
+                    <div><div class="small">point</div><strong>${formatNumber(point.x)}, ${formatNumber(point.y)}, ${formatNumber(point.z)}</strong></div>
+                    <div><div class="small">server_time</div><strong>${escapeHtml(collision.server_time ? new Date(Number(collision.server_time)).toISOString() : "n/a")}</strong></div>
+                </div>
+            `;
+            return card;
+        });
+
+        elements.collisionFeed.className = "stack";
+        elements.collisionFeed.replaceChildren(...cards);
+    }
+
     function drawDamagePreview(canvas, player) {
         const context = canvas.getContext("2d");
         context.clearRect(0, 0, canvas.width, canvas.height);
@@ -560,10 +649,20 @@
 
         const telemetry = match.telemetry;
         const cards = [
+            createTelemetryCard("Player Input In", telemetry.player_input_in, [
+                metricLine("msg/s", telemetry.player_input_in && telemetry.player_input_in.messages_per_sec),
+                metricLine("KB/s", kbFromBytes(telemetry.player_input_in && telemetry.player_input_in.bytes_per_sec)),
+                metricLine("total msg", telemetry.player_input_in && telemetry.player_input_in.total_messages),
+            ]),
             createTelemetryCard("Player State In", telemetry.player_state_in, [
                 metricLine("msg/s", telemetry.player_state_in && telemetry.player_state_in.messages_per_sec),
                 metricLine("KB/s", kbFromBytes(telemetry.player_state_in && telemetry.player_state_in.bytes_per_sec)),
                 metricLine("total msg", telemetry.player_state_in && telemetry.player_state_in.total_messages),
+            ]),
+            createTelemetryCard("Simulation I/O", telemetry.simulation_snapshot_in, [
+                metricLine("snapshot KB/s", kbFromBytes(telemetry.simulation_snapshot_in && telemetry.simulation_snapshot_in.bytes_per_sec)),
+                metricLine("input out/s", telemetry.simulation_input_out && telemetry.simulation_input_out.messages_per_sec),
+                metricLine("last snapshot", `${telemetry.last_simulation_snapshot_bytes || 0} B`),
             ]),
             createTelemetryCard("Match State Out", telemetry.match_state_out, [
                 metricLine("msg/s", telemetry.match_state_out && telemetry.match_state_out.messages_per_sec),
@@ -574,6 +673,11 @@
                 metricLine("damage in/s", telemetry.damage_state_in && telemetry.damage_state_in.messages_per_sec),
                 metricLine("damage out/s", telemetry.damage_state_out && telemetry.damage_state_out.messages_per_sec),
                 metricLine("last damage", `${telemetry.last_damage_payload_bytes || 0} B`),
+            ]),
+            createTelemetryCard("Collision Relay", telemetry.collision_event_in, [
+                metricLine("collision in/s", telemetry.collision_event_in && telemetry.collision_event_in.messages_per_sec),
+                metricLine("collision out/s", telemetry.collision_event_out && telemetry.collision_event_out.messages_per_sec),
+                metricLine("last collision", `${telemetry.last_collision_payload_bytes || 0} B`),
             ]),
             createTelemetryCard("Admin Stream", telemetry.admin_state_out, [
                 metricLine("msg/s", telemetry.admin_state_out && telemetry.admin_state_out.messages_per_sec),

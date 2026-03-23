@@ -170,6 +170,17 @@ button.secondary {
     color: var(--ink);
 }
 
+button.danger {
+    background: var(--bad);
+    color: #fff;
+}
+
+button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+}
+
 .toolbar-actions,
 .toolbar-stats {
     display: flex;
@@ -216,6 +227,12 @@ button.secondary {
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 14px;
+}
+
+.panel-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .nested-head {
