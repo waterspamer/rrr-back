@@ -1159,11 +1159,25 @@ class RuntimeState:
                 self.loading_tasks.pop(match_id, None)
 
     async def _run_match_loop(self, match_id: str) -> None:
-        tick_interval = 1 / self.settings.match_tick_rate
-        broadcast_every = max(1, round(self.settings.match_tick_rate / max(1, self.settings.match_broadcast_rate)))
+        async with self.lock:
+            match = self.matches_by_id.get(match_id)
+            if match is None:
+                return
+            tick_rate = max(1, int(match.tick_rate or self.settings.match_tick_rate))
+            broadcast_rate = max(1, int(match.broadcast_rate or self.settings.match_broadcast_rate))
+
+        tick_interval = 1 / tick_rate
+        broadcast_every = max(1, round(tick_rate / max(1, broadcast_rate)))
+        loop = asyncio.get_running_loop()
+        next_tick_at = loop.time()
         try:
             while True:
-                await asyncio.sleep(tick_interval)
+                next_tick_at += tick_interval
+                delay = next_tick_at - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                else:
+                    next_tick_at = loop.time()
                 snapshot = None
                 close_result: dict[str, Any] | None = None
                 disconnected_events: list[dict[str, Any]] = []
@@ -1661,11 +1675,18 @@ class RuntimeState:
         }
 
     def _serialize_match_state(self, match: Match) -> dict[str, Any]:
+        server_time = int(time.time() * 1000)
+        if isinstance(match.last_simulation_snapshot, dict):
+            try:
+                server_time = int(match.last_simulation_snapshot.get("server_time", server_time) or server_time)
+            except (TypeError, ValueError):
+                server_time = int(time.time() * 1000)
+
         return {
             "type": "match_state",
             "match_id": match.match_id,
             "server_tick": match.server_tick,
-            "server_time": int(time.time() * 1000),
+            "server_time": server_time,
             "players": [
                 {
                     "player_id": player.player_id,
