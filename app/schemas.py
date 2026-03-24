@@ -239,7 +239,7 @@ class AdminMatchPlayerResponse(BaseModel):
     nitro: bool = False
     car_config: dict[str, Any]
     wheel_state_count: int = 0
-    damage_revision: int = 0
+    damage_revision: int = -1
     damage_width: int = 0
     damage_height: int = 0
     damage_map_bytes: int = 0

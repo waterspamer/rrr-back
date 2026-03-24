@@ -104,7 +104,7 @@ class MatchPlayer:
     handbrake: bool = False
     nitro: bool = False
     last_snapshot_at: datetime = field(default_factory=datetime.utcnow)
-    damage_revision: int = 0
+    damage_revision: int = -1
     damage_width: int = 0
     damage_height: int = 0
     damage_map_b64: str | None = None
