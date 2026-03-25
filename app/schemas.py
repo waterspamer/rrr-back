@@ -283,3 +283,27 @@ class AdminMatchDetailResponse(BaseModel):
     recent_collisions: list[dict[str, Any]] = Field(default_factory=list)
     raw_snapshot: dict[str, Any]
     telemetry: dict[str, Any]
+
+
+class AdminGameSettingsSectionRequest(BaseModel):
+    section_id: str
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminGameSettingsUpdateRequest(BaseModel):
+    sections: list[AdminGameSettingsSectionRequest] = Field(default_factory=list)
+
+
+class AdminGameSettingsSectionResponse(BaseModel):
+    section_id: str
+    title: str
+    description: str | None = None
+    editable: bool = True
+    meta: dict[str, Any] = Field(default_factory=dict)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminGameSettingsResponse(BaseModel):
+    match_id: str
+    source: str = "backend_runtime"
+    sections: list[AdminGameSettingsSectionResponse] = Field(default_factory=list)

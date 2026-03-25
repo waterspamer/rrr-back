@@ -82,90 +82,114 @@
                 </article>
             </section>
 
-            <section class="panel">
-                <div class="panel-head">
-                    <h2>Realtime Telemetry</h2>
-                    <span class="badge">10 sec rolling window</span>
+            <section class="panel tab-strip">
+                <div class="tab-buttons" role="tablist" aria-label="Admin content tabs">
+                    <button id="observerTabButton" type="button" class="tab-button active" data-tab="observer">Observer</button>
+                    <button id="gameSettingsTabButton" type="button" class="tab-button" data-tab="gameSettings">GameSettings</button>
                 </div>
-                <div id="networkStats" class="telemetry-grid empty-state">Select a match to inspect relay load.</div>
+                <p class="status-meta">Observer keeps the live debug view. GameSettings is the runtime config surface for the selected match.</p>
             </section>
 
-            <section class="panel" id="lobbyDetailPanel">
-                <div class="panel-head">
-                    <h2>Lobby Detail</h2>
-                    <div class="panel-actions">
-                        <span id="lobbyStatusPill" class="status-pill neutral">idle</span>
-                        <button id="killLobbyButton" type="button" class="danger" disabled>Kill lobby</button>
-                    </div>
-                </div>
-                <div id="lobbyDetail" class="empty-state">Select a lobby to inspect players and car configs.</div>
-            </section>
-
-            <section class="panel match-grid">
-                <div class="match-main">
+            <div id="observerTabContent" class="tab-panel active">
+                <section class="panel">
                     <div class="panel-head">
-                        <h2>Match Detail</h2>
-                        <span id="matchStatusPill" class="status-pill neutral">idle</span>
+                        <h2>Realtime Telemetry</h2>
+                        <span class="badge">10 sec rolling window</span>
                     </div>
-                    <div id="matchSummary" class="match-summary empty-state">Select a match to inspect.</div>
-                    <div class="table-wrap">
-                        <table>
-                            <thead>
-                            <tr>
-                                <th>player_id</th>
-                                <th>player_name</th>
-                                <th>source</th>
-                                <th>x</th>
-                                <th>y</th>
-                                <th>z</th>
-                                <th>rot_x</th>
-                                <th>rot_y</th>
-                                <th>rot_z</th>
-                                <th>vx</th>
-                                <th>vy</th>
-                                <th>vz</th>
-                                <th>speed</th>
-                                <th>ack</th>
-                                <th>grounded</th>
-                                <th>damage</th>
-                                <th>connection</th>
-                            </tr>
-                            </thead>
-                            <tbody id="playersTable"></tbody>
-                        </table>
-                    </div>
-                    <div class="panel-head nested-head">
-                        <h2>Player Debug</h2>
-                        <span class="badge">live state / loadout / spawn info</span>
-                    </div>
-                    <div id="matchPlayersDebug" class="stack empty-state">Select a match to inspect player debug state.</div>
-                    <div class="panel-head nested-head">
-                        <h2>Damage Maps</h2>
-                        <span class="badge">live relay preview</span>
-                    </div>
-                    <div id="damageMaps" class="damage-grid empty-state">Select a match to inspect damage textures.</div>
-                    <div class="panel-head nested-head">
-                        <h2>Recent Collisions</h2>
-                        <span class="badge">authoritative relay</span>
-                    </div>
-                    <div id="collisionFeed" class="stack empty-state">Select a match to inspect collision events.</div>
-                </div>
-                <div class="panel map-panel">
-                    <div class="panel-head">
-                        <h2>Top-Down Map</h2>
-                        <span class="badge">x / z projection</span>
-                    </div>
-                    <canvas id="matchCanvas" width="600" height="380"></canvas>
-                </div>
-            </section>
+                    <div id="networkStats" class="telemetry-grid empty-state">Select a match to inspect relay load.</div>
+                </section>
 
-            <section class="panel">
-                <div class="panel-head">
-                    <h2>Raw JSON Snapshot</h2>
-                    <span class="badge">admin detail / state payload</span>
-                </div>
-                <pre id="rawSnapshot" class="raw-block">{}</pre>
-            </section>
+                <section class="panel" id="lobbyDetailPanel">
+                    <div class="panel-head">
+                        <h2>Lobby Detail</h2>
+                        <div class="panel-actions">
+                            <span id="lobbyStatusPill" class="status-pill neutral">idle</span>
+                            <button id="killLobbyButton" type="button" class="danger" disabled>Kill lobby</button>
+                        </div>
+                    </div>
+                    <div id="lobbyDetail" class="empty-state">Select a lobby to inspect players and car configs.</div>
+                </section>
+
+                <section class="panel match-grid">
+                    <div class="match-main">
+                        <div class="panel-head">
+                            <h2>Match Detail</h2>
+                            <span id="matchStatusPill" class="status-pill neutral">idle</span>
+                        </div>
+                        <div id="matchSummary" class="match-summary empty-state">Select a match to inspect.</div>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                <tr>
+                                    <th>player_id</th>
+                                    <th>player_name</th>
+                                    <th>source</th>
+                                    <th>x</th>
+                                    <th>y</th>
+                                    <th>z</th>
+                                    <th>rot_x</th>
+                                    <th>rot_y</th>
+                                    <th>rot_z</th>
+                                    <th>vx</th>
+                                    <th>vy</th>
+                                    <th>vz</th>
+                                    <th>speed</th>
+                                    <th>ack</th>
+                                    <th>grounded</th>
+                                    <th>damage</th>
+                                    <th>connection</th>
+                                </tr>
+                                </thead>
+                                <tbody id="playersTable"></tbody>
+                            </table>
+                        </div>
+                        <div class="panel-head nested-head">
+                            <h2>Player Debug</h2>
+                            <span class="badge">live state / loadout / spawn info</span>
+                        </div>
+                        <div id="matchPlayersDebug" class="stack empty-state">Select a match to inspect player debug state.</div>
+                        <div class="panel-head nested-head">
+                            <h2>Damage Maps</h2>
+                            <span class="badge">live relay preview</span>
+                        </div>
+                        <div id="damageMaps" class="damage-grid empty-state">Select a match to inspect damage textures.</div>
+                        <div class="panel-head nested-head">
+                            <h2>Recent Collisions</h2>
+                            <span class="badge">authoritative relay</span>
+                        </div>
+                        <div id="collisionFeed" class="stack empty-state">Select a match to inspect collision events.</div>
+                    </div>
+                    <div class="panel map-panel">
+                        <div class="panel-head">
+                            <h2>Top-Down Map</h2>
+                            <span class="badge">x / z projection</span>
+                        </div>
+                        <canvas id="matchCanvas" width="600" height="380"></canvas>
+                    </div>
+                </section>
+
+                <section class="panel">
+                    <div class="panel-head">
+                        <h2>Raw JSON Snapshot</h2>
+                        <span class="badge">admin detail / state payload</span>
+                    </div>
+                    <pre id="rawSnapshot" class="raw-block">{}</pre>
+                </section>
+            </div>
+
+            <div id="gameSettingsTabContent" class="tab-panel">
+                <section class="panel">
+                    <div class="panel-head">
+                        <h2>GameSettings</h2>
+                        <div class="panel-actions">
+                            <span id="gameSettingsSourceBadge" class="badge">no match</span>
+                            <button id="refreshGameSettingsButton" type="button" class="secondary" disabled>Reload settings</button>
+                        </div>
+                    </div>
+                    <div id="gameSettingsSummary" class="empty-state">Select a match to inspect runtime settings.</div>
+                    <div id="gameSettingsSections" class="stack empty-state">No settings loaded.</div>
+                </section>
+            </div>
         </section>
     </main>
 </div>

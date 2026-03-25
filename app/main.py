@@ -15,6 +15,8 @@ from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
 from app.schemas import (
     AdminLobbyCloseResponse,
+    AdminGameSettingsResponse,
+    AdminGameSettingsUpdateRequest,
     AdminLobbiesResponse,
     AdminLobbyResponse,
     AdminMatchDetailResponse,
@@ -228,6 +230,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
         return await runtime.get_admin_match(match_id)
+
+    @app.get(f"{settings.api_prefix}/admin/matches/{{match_id}}/game-settings", response_model=AdminGameSettingsResponse)
+    async def get_admin_match_game_settings(
+        match_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.get_admin_match_game_settings(match_id)
+
+    @app.put(f"{settings.api_prefix}/admin/matches/{{match_id}}/game-settings", response_model=AdminGameSettingsResponse)
+    async def update_admin_match_game_settings(
+        match_id: str,
+        request: AdminGameSettingsUpdateRequest,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.update_admin_match_game_settings(match_id, request.model_dump(mode="json"))
 
     @app.websocket(f"{settings.api_prefix}/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

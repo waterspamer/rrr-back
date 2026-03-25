@@ -411,6 +411,7 @@ def test_admin_rest_and_panel_html() -> None:
         panel = client.get("/admin")
         assert panel.status_code == 200
         assert "Observer Console" in panel.text
+        assert "GameSettings" in panel.text
 
         unauthorized_response = client.get("/api/v1/admin/lobbies")
         assert unauthorized_response.status_code == 401
@@ -748,6 +749,116 @@ def test_admin_rest_includes_direct_purrnet_observer_match() -> None:
         assert queued_bot["debug"]["last_spawn_failure_reason"] == "player_not_loaded_in_scene"
         assert detail_payload["telemetry"]["spawner"]["solo_bot_target"] == 1
         assert detail_payload["recent_collisions"][0]["primary_player_id"] == "player_live_1"
+
+
+def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
+    with build_client_with_admin(admin_token="secret-token", direct_observer_url="http://observer.local") as client:
+        runtime = client.app.state.runtime
+        captured_update: dict[str, object] = {}
+
+        damage_fields = {
+            "obstacle_tag": "Obstacle",
+            "impulse_to_color": 0.17,
+            "max_color_step": 0.45,
+            "impulse_to_radius": 0.55,
+            "impulse_from_speed_factor": 0.12,
+            "max_radius_cells": 6,
+            "min_speed_for_damage_kmh": 8.0,
+            "max_speed_for_damage_kmh": 90.0,
+            "min_damage_scale": 0.3,
+            "glancing_damage_scale": 0.65,
+            "impact_alignment_power": 1.1,
+            "speed_radius_boost": 0.4,
+            "compute_deform_amplitude": 0.22,
+            "compute_deform_direction": 0.38,
+            "compute_deform_sin_frequency": 3.2,
+            "compute_deform_sin_strength": 0.14,
+            "compute_yield_threshold": 0.08,
+            "compute_hardening": 0.11,
+            "compute_max_deform": 0.44,
+            "compute_two_level_damage": True,
+            "compute_coarse_radius": 4,
+            "compute_coarse_weight": 0.6,
+            "compute_coarse_boost": 0.2,
+            "compute_coarse_deform_meters": 0.09,
+        }
+
+        async def fake_get_room(match_id: str) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            return {
+                "room_id": "purrnet-live",
+                "match_id": "purrnet-live",
+                "status": "running",
+                "source": "purrnet_direct",
+            }
+
+        async def fake_get_snapshot(match_id: str) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            return {
+                "match_id": "purrnet-live",
+                "status": "running",
+                "observer": {},
+            }
+
+        async def fake_get_damage_config(match_id: str) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            return {
+                "version": 1,
+                "revision": 4,
+                "updated_at_unix_ms": 1711459200000,
+                "source": "car_config",
+                **damage_fields,
+            }
+
+        async def fake_update_damage_config(match_id: str, payload: dict[str, object]) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            captured_update["match_id"] = match_id
+            captured_update["payload"] = payload
+            return {
+                "version": 1,
+                "revision": 5,
+                "updated_at_unix_ms": 1711459200123,
+                "source": "observer_admin",
+                **payload,
+            }
+
+        runtime.direct_observer.get_room = fake_get_room
+        runtime.direct_observer.get_snapshot = fake_get_snapshot
+        runtime.direct_observer.get_damage_config = fake_get_damage_config
+        runtime.direct_observer.update_damage_config = fake_update_damage_config
+
+        response = client.get("/api/v1/admin/matches/purrnet-live/game-settings", params={"token": "secret-token"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["match_id"] == "purrnet-live"
+        assert payload["source"] == "purrnet_direct"
+        assert len(payload["sections"]) == 1
+        assert payload["sections"][0]["section_id"] == "damage"
+        assert payload["sections"][0]["meta"]["revision"] == 4
+        assert payload["sections"][0]["fields"]["obstacle_tag"] == "Obstacle"
+
+        update = client.put(
+            "/api/v1/admin/matches/purrnet-live/game-settings",
+            params={"token": "secret-token"},
+            json={
+                "sections": [
+                    {
+                        "section_id": "damage",
+                        "fields": {**damage_fields, "impulse_to_color": 0.25},
+                    }
+                ]
+            },
+        )
+        assert update.status_code == 200
+        update_payload = update.json()
+        assert captured_update["match_id"] == "purrnet-live"
+        assert captured_update["payload"]["impulse_to_color"] == 0.25
+        assert update_payload["sections"][0]["meta"]["revision"] == 5
+        assert update_payload["sections"][0]["fields"]["impulse_to_color"] == 0.25
 
 
 def test_authoritative_simulation_snapshot_overrides_client_state() -> None:

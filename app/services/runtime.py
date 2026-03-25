@@ -486,6 +486,55 @@ class RuntimeState:
             return direct_match
         raise match_not_found()
 
+    async def get_admin_match_game_settings(self, match_id: str) -> dict[str, Any]:
+        async with self.lock:
+            if match_id in self.matches_by_id:
+                return self._build_admin_game_settings_response(match_id, "backend_runtime", None)
+
+        direct_match = await self._get_direct_admin_match(match_id)
+        if direct_match is None:
+            raise match_not_found()
+
+        damage_config = self._extract_damage_config_from_match_payload(direct_match)
+        if damage_config is None and self.direct_observer.enabled:
+            try:
+                damage_config = await self.direct_observer.get_damage_config(match_id)
+            except Exception:
+                logger.warning("direct_observer_damage_config_get_failed match_id=%s", match_id, exc_info=True)
+
+        return self._build_admin_game_settings_response(
+            match_id,
+            str(direct_match.get("source", "purrnet_direct") or "purrnet_direct"),
+            damage_config,
+        )
+
+    async def update_admin_match_game_settings(self, match_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self.lock:
+            if match_id in self.matches_by_id:
+                raise invalid_request("Game settings updates are currently supported only for direct PurrNet matches")
+
+        direct_match = await self._get_direct_admin_match(match_id)
+        if direct_match is None:
+            raise match_not_found()
+        if not self.direct_observer.enabled:
+            raise invalid_request("Direct observer is not configured")
+
+        damage_fields = self._extract_game_settings_section_fields(payload, "damage")
+        if damage_fields is None:
+            raise invalid_request("Game settings payload must include a damage section")
+
+        try:
+            damage_config = await self.direct_observer.update_damage_config(match_id, damage_fields)
+        except Exception as exc:
+            logger.warning("direct_observer_damage_config_update_failed match_id=%s", match_id, exc_info=True)
+            raise invalid_request(f"Failed to update damage settings: {exc}") from exc
+
+        return self._build_admin_game_settings_response(
+            match_id,
+            str(direct_match.get("source", "purrnet_direct") or "purrnet_direct"),
+            damage_config,
+        )
+
     async def close_lobby(self, lobby_id: str, *, reason: str) -> dict[str, Any]:
         async with self.lock:
             close_result = self._close_lobby_locked(lobby_id, reason)
@@ -1963,6 +2012,72 @@ class RuntimeState:
             "recent_collisions": snapshot.get("collisions") if isinstance(snapshot.get("collisions"), list) else [],
             "raw_snapshot": raw_snapshot,
             "telemetry": self._build_direct_admin_telemetry(raw_snapshot),
+        }
+
+    @staticmethod
+    def _extract_damage_config_from_match_payload(match_payload: dict[str, Any]) -> dict[str, Any] | None:
+        raw_snapshot = match_payload.get("raw_snapshot") if isinstance(match_payload, dict) else None
+        if not isinstance(raw_snapshot, dict):
+            return None
+
+        damage_config = raw_snapshot.get("damage_config")
+        if isinstance(damage_config, dict):
+            return damage_config
+
+        observer = raw_snapshot.get("observer")
+        if not isinstance(observer, dict):
+            return None
+
+        nested_damage_config = observer.get("damage_config")
+        return nested_damage_config if isinstance(nested_damage_config, dict) else None
+
+    @staticmethod
+    def _extract_game_settings_section_fields(payload: dict[str, Any], section_id: str) -> dict[str, Any] | None:
+        sections = payload.get("sections") if isinstance(payload, dict) else None
+        if not isinstance(sections, list):
+            return None
+
+        for item in sections:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("section_id", "") or "") != section_id:
+                continue
+            fields = item.get("fields")
+            return fields if isinstance(fields, dict) else None
+
+        return None
+
+    @staticmethod
+    def _build_admin_game_settings_response(
+        match_id: str,
+        source: str,
+        damage_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        sections: list[dict[str, Any]] = []
+        if isinstance(damage_config, dict):
+            meta: dict[str, Any] = {}
+            fields: dict[str, Any] = {}
+            for key, value in damage_config.items():
+                if key in {"version", "revision", "updated_at_unix_ms", "source"}:
+                    meta[key] = value
+                else:
+                    fields[key] = value
+
+            sections.append(
+                {
+                    "section_id": "damage",
+                    "title": "Damage",
+                    "description": "Runtime collision and deformation tuning pulled from the dedicated observer.",
+                    "editable": source == "purrnet_direct",
+                    "meta": meta,
+                    "fields": fields,
+                }
+            )
+
+        return {
+            "match_id": match_id,
+            "source": source or "backend_runtime",
+            "sections": sections,
         }
 
     def _serialize_direct_admin_match_player(

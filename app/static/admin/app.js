@@ -12,8 +12,15 @@
         manualClose: false,
         lobbyRequestVersion: 0,
         matchRequestVersion: 0,
+        gameSettingsRequestVersion: 0,
         matchPollTimer: null,
         matchListPollTimer: null,
+        activeTab: "observer",
+        selectedGameSettings: null,
+        gameSettingsDraftBySection: {},
+        dirtyGameSettingsSections: {},
+        gameSettingsLoading: false,
+        gameSettingsSavingSection: null,
     };
 
     const elements = {
@@ -47,6 +54,14 @@
         collisionFeed: document.getElementById("collisionFeed"),
         rawSnapshot: document.getElementById("rawSnapshot"),
         canvas: document.getElementById("matchCanvas"),
+        observerTabButton: document.getElementById("observerTabButton"),
+        gameSettingsTabButton: document.getElementById("gameSettingsTabButton"),
+        observerTabContent: document.getElementById("observerTabContent"),
+        gameSettingsTabContent: document.getElementById("gameSettingsTabContent"),
+        gameSettingsSourceBadge: document.getElementById("gameSettingsSourceBadge"),
+        refreshGameSettingsButton: document.getElementById("refreshGameSettingsButton"),
+        gameSettingsSummary: document.getElementById("gameSettingsSummary"),
+        gameSettingsSections: document.getElementById("gameSettingsSections"),
     };
 
     function init() {
@@ -57,6 +72,15 @@
         elements.applyTokenButton.addEventListener("click", applyToken);
         elements.refreshButton.addEventListener("click", refreshAll);
         elements.killLobbyButton.addEventListener("click", killSelectedLobby);
+        elements.observerTabButton.addEventListener("click", function () {
+            switchTab("observer");
+        });
+        elements.gameSettingsTabButton.addEventListener("click", function () {
+            switchTab("gameSettings");
+        });
+        elements.refreshGameSettingsButton.addEventListener("click", function () {
+            loadSelectedMatchGameSettings(true).then(render).catch(renderError);
+        });
         window.addEventListener("beforeunload", closeSocket);
 
         refreshAll().finally(function () {
@@ -93,7 +117,7 @@
             syncSelectedLobbyFromList();
             syncSelectedMatchFromList();
 
-            await Promise.all([loadSelectedLobby(), loadSelectedMatch()]);
+            await Promise.all([loadSelectedLobby(), loadSelectedMatch(), loadSelectedMatchGameSettings(true)]);
             render();
             setStatus(state.socket && state.socket.readyState === WebSocket.OPEN ? "connected" : "disconnected", "Snapshot synced");
         } catch (error) {
@@ -124,6 +148,7 @@
         const requestVersion = ++state.matchRequestVersion;
         if (!state.selectedMatchId) {
             state.selectedMatch = null;
+            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             return;
         }
@@ -138,6 +163,7 @@
             syncSelectedMatchPolling();
         } catch (error) {
             state.selectedMatch = null;
+            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             if (state.selectedMatchId) {
                 await refreshMatchesListSilently();
@@ -407,9 +433,11 @@
     }
 
     function syncSelectedMatchFromList() {
+        const previousMatchId = state.selectedMatchId;
         if (!state.matches.length) {
             state.selectedMatchId = null;
             state.selectedMatch = null;
+            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             return;
         }
@@ -424,6 +452,9 @@
             return match.match_id === state.selectedMatchId;
         });
         state.selectedMatch = summary ? { ...summary, ...(state.selectedMatch || {}) } : null;
+        if (previousMatchId !== state.selectedMatchId) {
+            clearSelectedGameSettings();
+        }
         syncSelectedMatchPolling();
     }
 
@@ -437,15 +468,73 @@
     function selectMatch(matchId) {
         state.selectedMatchId = matchId;
         syncSelectedMatchFromList();
+        clearSelectedGameSettings();
         render();
-        loadSelectedMatch().then(render).catch(renderError);
+        Promise.all([loadSelectedMatch(), loadSelectedMatchGameSettings(true)]).then(render).catch(renderError);
+    }
+
+    function switchTab(tabId) {
+        state.activeTab = tabId === "gameSettings" ? "gameSettings" : "observer";
+        renderTabs();
+        renderGameSettings();
+    }
+
+    function renderTabs() {
+        const observerActive = state.activeTab === "observer";
+        elements.observerTabButton.classList.toggle("active", observerActive);
+        elements.gameSettingsTabButton.classList.toggle("active", !observerActive);
+        elements.observerTabContent.classList.toggle("active", observerActive);
+        elements.gameSettingsTabContent.classList.toggle("active", !observerActive);
+    }
+
+    function clearSelectedGameSettings() {
+        state.selectedGameSettings = null;
+        state.gameSettingsDraftBySection = {};
+        state.dirtyGameSettingsSections = {};
+        state.gameSettingsLoading = false;
+        state.gameSettingsSavingSection = null;
+    }
+
+    async function loadSelectedMatchGameSettings(forceReload) {
+        const requestVersion = ++state.gameSettingsRequestVersion;
+        if (!state.selectedMatchId) {
+            clearSelectedGameSettings();
+            return;
+        }
+
+        if (!forceReload && state.selectedGameSettings && state.selectedGameSettings.match_id === state.selectedMatchId) {
+            return;
+        }
+
+        state.gameSettingsLoading = true;
+        try {
+            const matchId = state.selectedMatchId;
+            const payload = await apiGet(`/api/v1/admin/matches/${matchId}/game-settings`);
+            if (requestVersion !== state.gameSettingsRequestVersion || matchId !== state.selectedMatchId) {
+                return;
+            }
+            state.selectedGameSettings = payload;
+            state.gameSettingsDraftBySection = buildSectionDrafts(payload.sections || []);
+            state.dirtyGameSettingsSections = {};
+        } catch (error) {
+            if (requestVersion === state.gameSettingsRequestVersion) {
+                clearSelectedGameSettings();
+            }
+            renderError(error);
+        } finally {
+            if (requestVersion === state.gameSettingsRequestVersion) {
+                state.gameSettingsLoading = false;
+            }
+        }
     }
 
     function render() {
+        renderTabs();
         renderLists();
         renderLobbyDetail();
         renderMatchDetail();
         renderTelemetry();
+        renderGameSettings();
     }
 
     function renderLists() {
@@ -837,6 +926,189 @@
         elements.networkStats.replaceChildren(...cards);
     }
 
+    function renderGameSettings() {
+        const match = state.selectedMatch;
+        const gameSettings = state.selectedGameSettings;
+        const hasMatch = Boolean(match);
+        const source = hasMatch ? (match.source || "backend_runtime") : "no match";
+        elements.gameSettingsSourceBadge.textContent = source;
+        elements.refreshGameSettingsButton.disabled = !hasMatch || state.gameSettingsLoading || state.gameSettingsSavingSection !== null;
+
+        if (!match) {
+            elements.gameSettingsSummary.className = "empty-state";
+            elements.gameSettingsSummary.textContent = "Select a match to inspect runtime settings.";
+            elements.gameSettingsSections.className = "stack empty-state";
+            elements.gameSettingsSections.textContent = "No settings loaded.";
+            return;
+        }
+
+        const summaryCards = [
+            { label: "match_id", value: match.match_id },
+            { label: "source", value: source },
+            { label: "room", value: match.room_id || "n/a" },
+            { label: "status", value: match.status || "n/a" },
+        ];
+        elements.gameSettingsSummary.className = "fact-grid";
+        elements.gameSettingsSummary.innerHTML = buildFactTiles(summaryCards);
+
+        if (state.gameSettingsLoading && !gameSettings) {
+            elements.gameSettingsSections.className = "stack empty-state";
+            elements.gameSettingsSections.textContent = "Loading runtime settings.";
+            return;
+        }
+
+        if (!gameSettings || !Array.isArray(gameSettings.sections) || !gameSettings.sections.length) {
+            elements.gameSettingsSections.className = "stack empty-state";
+            elements.gameSettingsSections.textContent = source === "purrnet_direct"
+                ? "This match does not expose runtime settings yet."
+                : "Runtime GameSettings are currently available only for direct PurrNet matches.";
+            return;
+        }
+
+        const sections = gameSettings.sections.map(function (section) {
+            return createGameSettingsSection(section);
+        });
+        elements.gameSettingsSections.className = "stack";
+        elements.gameSettingsSections.replaceChildren(...sections);
+    }
+
+    function createGameSettingsSection(section) {
+        const card = document.createElement("article");
+        card.className = "settings-card";
+
+        const head = document.createElement("div");
+        head.className = "panel-head nested-headless";
+        head.innerHTML = `
+            <div>
+                <h2>${escapeHtml(section.title || section.section_id)}</h2>
+                <p class="settings-description">${escapeHtml(section.description || "Runtime settings section.")}</p>
+            </div>
+            <div class="panel-actions">
+                <span class="badge">${escapeHtml(section.section_id)}</span>
+                <button
+                    type="button"
+                    class="secondary"
+                    ${section.editable ? "" : "disabled"}
+                >${state.gameSettingsSavingSection === section.section_id ? "Saving..." : "Save section"}</button>
+            </div>
+        `;
+        const saveButton = head.querySelector("button");
+        if (saveButton) {
+            saveButton.disabled = !section.editable || state.gameSettingsSavingSection === section.section_id;
+            saveButton.addEventListener("click", function () {
+                saveGameSettingsSection(section.section_id);
+            });
+        }
+        card.appendChild(head);
+
+        const metaEntries = Object.entries(section.meta || {});
+        if (metaEntries.length) {
+            const meta = document.createElement("div");
+            meta.className = "fact-grid";
+            meta.innerHTML = buildFactTiles(metaEntries.map(function (entry) {
+                return {
+                    label: entry[0],
+                    value: entry[0] === "updated_at_unix_ms" ? formatTimestamp(entry[1]) : String(entry[1]),
+                };
+            }));
+            card.appendChild(meta);
+        }
+
+        const fields = document.createElement("div");
+        fields.className = "settings-grid";
+        Object.entries(section.fields || {}).forEach(function (entry) {
+            const key = entry[0];
+            const originalValue = entry[1];
+            const draftValue = getDraftFieldValue(section.section_id, key, originalValue);
+            fields.appendChild(createGameSettingsField(section.section_id, key, draftValue, originalValue, Boolean(section.editable)));
+        });
+        card.appendChild(fields);
+
+        const footer = document.createElement("div");
+        footer.className = "settings-footer";
+        footer.textContent = state.dirtyGameSettingsSections[section.section_id]
+            ? "Unsaved changes"
+            : "Saved";
+        card.appendChild(footer);
+
+        return card;
+    }
+
+    function createGameSettingsField(sectionId, key, value, sampleValue, editable) {
+        const wrapper = document.createElement("label");
+        wrapper.className = "settings-field";
+
+        const caption = document.createElement("span");
+        caption.className = "small";
+        caption.textContent = formatSettingLabel(key);
+        wrapper.appendChild(caption);
+
+        let input;
+        if (typeof sampleValue === "boolean") {
+            input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = Boolean(value);
+            input.disabled = !editable || state.gameSettingsSavingSection === sectionId;
+            input.addEventListener("change", function () {
+                updateGameSettingsDraft(sectionId, key, input.checked);
+            });
+            wrapper.classList.add("checkbox-field");
+        } else {
+            input = document.createElement("input");
+            input.type = typeof sampleValue === "number" ? "number" : "text";
+            input.step = typeof sampleValue === "number" && Number.isInteger(sampleValue) ? "1" : "any";
+            input.value = value == null ? "" : String(value);
+            input.disabled = !editable || state.gameSettingsSavingSection === sectionId;
+            input.addEventListener("input", function () {
+                updateGameSettingsDraft(sectionId, key, coerceSettingValue(input.value, sampleValue));
+            });
+        }
+
+        wrapper.appendChild(input);
+        return wrapper;
+    }
+
+    async function saveGameSettingsSection(sectionId) {
+        const match = state.selectedMatch;
+        if (!match || !state.selectedMatchId) {
+            return;
+        }
+
+        const fields = state.gameSettingsDraftBySection[sectionId];
+        if (!fields) {
+            return;
+        }
+
+        state.gameSettingsSavingSection = sectionId;
+        renderGameSettings();
+        setStatus("syncing", `Saving ${sectionId} settings`);
+        try {
+            const payload = await apiRequest(`/api/v1/admin/matches/${state.selectedMatchId}/game-settings`, {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    sections: [
+                        {
+                            section_id: sectionId,
+                            fields: fields,
+                        },
+                    ],
+                }),
+            });
+            state.selectedGameSettings = payload;
+            state.gameSettingsDraftBySection = buildSectionDrafts(payload.sections || []);
+            state.dirtyGameSettingsSections = {};
+            setStatus("connected", `${sectionId} settings saved`);
+        } catch (error) {
+            renderError(error);
+        } finally {
+            state.gameSettingsSavingSection = null;
+            renderGameSettings();
+        }
+    }
+
     function drawMap(players) {
         const canvas = elements.canvas;
         const context = canvas.getContext("2d");
@@ -1045,6 +1317,61 @@
             return `${(number / 60).toFixed(1)}m`;
         }
         return `${number.toFixed(1)}s`;
+    }
+
+    function buildSectionDrafts(sections) {
+        const drafts = {};
+        sections.forEach(function (section) {
+            drafts[section.section_id] = cloneJson(section.fields || {});
+        });
+        return drafts;
+    }
+
+    function getDraftFieldValue(sectionId, key, fallbackValue) {
+        const draft = state.gameSettingsDraftBySection[sectionId];
+        if (draft && Object.prototype.hasOwnProperty.call(draft, key)) {
+            return draft[key];
+        }
+        return fallbackValue;
+    }
+
+    function updateGameSettingsDraft(sectionId, key, value) {
+        if (!state.gameSettingsDraftBySection[sectionId]) {
+            state.gameSettingsDraftBySection[sectionId] = {};
+        }
+        state.gameSettingsDraftBySection[sectionId][key] = value;
+        state.dirtyGameSettingsSections[sectionId] = true;
+    }
+
+    function coerceSettingValue(rawValue, sampleValue) {
+        if (typeof sampleValue === "number") {
+            const parsed = Number(rawValue);
+            return Number.isFinite(parsed) ? parsed : sampleValue;
+        }
+        if (typeof sampleValue === "boolean") {
+            return Boolean(rawValue);
+        }
+        return String(rawValue);
+    }
+
+    function formatSettingLabel(value) {
+        return String(value || "")
+            .replaceAll("_", " ")
+            .replace(/\b\w/g, function (char) {
+                return char.toUpperCase();
+            });
+    }
+
+    function formatTimestamp(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number <= 0) {
+            return "n/a";
+        }
+        return new Date(number).toISOString();
+    }
+
+    function cloneJson(value) {
+        return JSON.parse(JSON.stringify(value));
     }
 
     function escapeHtml(value) {
