@@ -71,6 +71,28 @@ class DirectObserverClient:
         response_payload = response.json()
         return response_payload if isinstance(response_payload, dict) else None
 
+    async def get_global_damage_config(self) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        client = self._ensure_client()
+        response = await client.get("/api/v1/damage-config", headers=self._headers())
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+
+    async def update_global_damage_config(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        client = self._ensure_client()
+        response = await client.put(
+            "/api/v1/damage-config",
+            headers=self._headers(),
+            json=payload,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+        return response_payload if isinstance(response_payload, dict) else None
+
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout_sec)

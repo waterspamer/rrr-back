@@ -486,36 +486,44 @@ class RuntimeState:
             return direct_match
         raise match_not_found()
 
-    async def get_admin_match_game_settings(self, match_id: str) -> dict[str, Any]:
-        async with self.lock:
-            if match_id in self.matches_by_id:
-                return self._build_admin_game_settings_response(match_id, "backend_runtime", None)
+    async def get_admin_game_settings(self) -> dict[str, Any]:
+        if not self.direct_observer.enabled:
+            return self._build_admin_game_settings_response(
+                source="backend_runtime",
+                damage_config=None,
+                note="Direct observer is not configured for global runtime settings.",
+            )
 
-        direct_match = await self._get_direct_admin_match(match_id)
-        if direct_match is None:
-            raise match_not_found()
+        note: str | None = None
+        damage_config: dict[str, Any] | None = None
 
-        damage_config = self._extract_damage_config_from_match_payload(direct_match)
-        if damage_config is None and self.direct_observer.enabled:
-            try:
-                damage_config = await self.direct_observer.get_damage_config(match_id)
-            except Exception:
-                logger.warning("direct_observer_damage_config_get_failed match_id=%s", match_id, exc_info=True)
+        try:
+            damage_config = await self.direct_observer.get_global_damage_config()
+        except Exception:
+            logger.warning("direct_observer_global_damage_config_get_failed", exc_info=True)
+
+        if damage_config is None:
+            fallback_room_id = await self._get_direct_observer_fallback_room_id()
+            if fallback_room_id:
+                try:
+                    damage_config = await self.direct_observer.get_damage_config(fallback_room_id)
+                    note = f"Global settings are currently proxied through active room {fallback_room_id}."
+                except Exception:
+                    logger.warning(
+                        "direct_observer_room_damage_config_get_failed room_id=%s",
+                        fallback_room_id,
+                        exc_info=True,
+                    )
+            else:
+                note = "Dedicated observer does not expose global settings yet and there is no active direct room for fallback."
 
         return self._build_admin_game_settings_response(
-            match_id,
-            str(direct_match.get("source", "purrnet_direct") or "purrnet_direct"),
-            damage_config,
+            source="purrnet_direct",
+            damage_config=damage_config,
+            note=note,
         )
 
-    async def update_admin_match_game_settings(self, match_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        async with self.lock:
-            if match_id in self.matches_by_id:
-                raise invalid_request("Game settings updates are currently supported only for direct PurrNet matches")
-
-        direct_match = await self._get_direct_admin_match(match_id)
-        if direct_match is None:
-            raise match_not_found()
+    async def update_admin_game_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.direct_observer.enabled:
             raise invalid_request("Direct observer is not configured")
 
@@ -523,16 +531,36 @@ class RuntimeState:
         if damage_fields is None:
             raise invalid_request("Game settings payload must include a damage section")
 
+        note: str | None = None
+        damage_config: dict[str, Any] | None = None
+
         try:
-            damage_config = await self.direct_observer.update_damage_config(match_id, damage_fields)
-        except Exception as exc:
-            logger.warning("direct_observer_damage_config_update_failed match_id=%s", match_id, exc_info=True)
-            raise invalid_request(f"Failed to update damage settings: {exc}") from exc
+            damage_config = await self.direct_observer.update_global_damage_config(damage_fields)
+        except Exception:
+            logger.warning("direct_observer_global_damage_config_update_failed", exc_info=True)
+
+        if damage_config is None:
+            fallback_room_id = await self._get_direct_observer_fallback_room_id()
+            if not fallback_room_id:
+                raise invalid_request(
+                    "Dedicated observer global settings endpoint is unavailable and there is no active direct room for fallback"
+                )
+
+            try:
+                damage_config = await self.direct_observer.update_damage_config(fallback_room_id, damage_fields)
+                note = f"Global settings were applied through active room {fallback_room_id}."
+            except Exception as exc:
+                logger.warning(
+                    "direct_observer_room_damage_config_update_failed room_id=%s",
+                    fallback_room_id,
+                    exc_info=True,
+                )
+                raise invalid_request(f"Failed to update damage settings: {exc}") from exc
 
         return self._build_admin_game_settings_response(
-            match_id,
-            str(direct_match.get("source", "purrnet_direct") or "purrnet_direct"),
-            damage_config,
+            source="purrnet_direct",
+            damage_config=damage_config,
+            note=note,
         )
 
     async def close_lobby(self, lobby_id: str, *, reason: str) -> dict[str, Any]:
@@ -2015,23 +2043,6 @@ class RuntimeState:
         }
 
     @staticmethod
-    def _extract_damage_config_from_match_payload(match_payload: dict[str, Any]) -> dict[str, Any] | None:
-        raw_snapshot = match_payload.get("raw_snapshot") if isinstance(match_payload, dict) else None
-        if not isinstance(raw_snapshot, dict):
-            return None
-
-        damage_config = raw_snapshot.get("damage_config")
-        if isinstance(damage_config, dict):
-            return damage_config
-
-        observer = raw_snapshot.get("observer")
-        if not isinstance(observer, dict):
-            return None
-
-        nested_damage_config = observer.get("damage_config")
-        return nested_damage_config if isinstance(nested_damage_config, dict) else None
-
-    @staticmethod
     def _extract_game_settings_section_fields(payload: dict[str, Any], section_id: str) -> dict[str, Any] | None:
         sections = payload.get("sections") if isinstance(payload, dict) else None
         if not isinstance(sections, list):
@@ -2047,11 +2058,27 @@ class RuntimeState:
 
         return None
 
+    async def _get_direct_observer_fallback_room_id(self) -> str | None:
+        try:
+            rooms = await self.direct_observer.list_rooms()
+        except Exception:
+            logger.warning("direct_observer_list_rooms_failed_for_game_settings", exc_info=True)
+            return None
+
+        for room in rooms:
+            if not isinstance(room, dict):
+                continue
+            match_id = str(room.get("match_id", "") or room.get("room_id", "") or "")
+            if match_id:
+                return match_id
+
+        return None
+
     @staticmethod
     def _build_admin_game_settings_response(
-        match_id: str,
         source: str,
         damage_config: dict[str, Any] | None,
+        note: str | None = None,
     ) -> dict[str, Any]:
         sections: list[dict[str, Any]] = []
         if isinstance(damage_config, dict):
@@ -2075,8 +2102,9 @@ class RuntimeState:
             )
 
         return {
-            "match_id": match_id,
+            "scope": "global",
             "source": source or "backend_runtime",
+            "note": note,
             "sections": sections,
         }
 

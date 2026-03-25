@@ -751,7 +751,7 @@ def test_admin_rest_includes_direct_purrnet_observer_match() -> None:
         assert detail_payload["recent_collisions"][0]["primary_player_id"] == "player_live_1"
 
 
-def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
+def test_admin_global_game_settings_proxy_for_direct_purrnet_observer() -> None:
     with build_client_with_admin(admin_token="secret-token", direct_observer_url="http://observer.local") as client:
         runtime = client.app.state.runtime
         captured_update: dict[str, object] = {}
@@ -783,28 +783,7 @@ def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
             "compute_coarse_deform_meters": 0.09,
         }
 
-        async def fake_get_room(match_id: str) -> dict[str, object] | None:
-            if match_id != "purrnet-live":
-                return None
-            return {
-                "room_id": "purrnet-live",
-                "match_id": "purrnet-live",
-                "status": "running",
-                "source": "purrnet_direct",
-            }
-
-        async def fake_get_snapshot(match_id: str) -> dict[str, object] | None:
-            if match_id != "purrnet-live":
-                return None
-            return {
-                "match_id": "purrnet-live",
-                "status": "running",
-                "observer": {},
-            }
-
-        async def fake_get_damage_config(match_id: str) -> dict[str, object] | None:
-            if match_id != "purrnet-live":
-                return None
+        async def fake_get_global_damage_config() -> dict[str, object] | None:
             return {
                 "version": 1,
                 "revision": 4,
@@ -813,10 +792,7 @@ def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
                 **damage_fields,
             }
 
-        async def fake_update_damage_config(match_id: str, payload: dict[str, object]) -> dict[str, object] | None:
-            if match_id != "purrnet-live":
-                return None
-            captured_update["match_id"] = match_id
+        async def fake_update_global_damage_config(payload: dict[str, object]) -> dict[str, object] | None:
             captured_update["payload"] = payload
             return {
                 "version": 1,
@@ -826,23 +802,22 @@ def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
                 **payload,
             }
 
-        runtime.direct_observer.get_room = fake_get_room
-        runtime.direct_observer.get_snapshot = fake_get_snapshot
-        runtime.direct_observer.get_damage_config = fake_get_damage_config
-        runtime.direct_observer.update_damage_config = fake_update_damage_config
+        runtime.direct_observer.get_global_damage_config = fake_get_global_damage_config
+        runtime.direct_observer.update_global_damage_config = fake_update_global_damage_config
 
-        response = client.get("/api/v1/admin/matches/purrnet-live/game-settings", params={"token": "secret-token"})
+        response = client.get("/api/v1/admin/game-settings", params={"token": "secret-token"})
         assert response.status_code == 200
         payload = response.json()
-        assert payload["match_id"] == "purrnet-live"
+        assert payload["scope"] == "global"
         assert payload["source"] == "purrnet_direct"
+        assert payload["note"] is None
         assert len(payload["sections"]) == 1
         assert payload["sections"][0]["section_id"] == "damage"
         assert payload["sections"][0]["meta"]["revision"] == 4
         assert payload["sections"][0]["fields"]["obstacle_tag"] == "Obstacle"
 
         update = client.put(
-            "/api/v1/admin/matches/purrnet-live/game-settings",
+            "/api/v1/admin/game-settings",
             params={"token": "secret-token"},
             json={
                 "sections": [
@@ -855,10 +830,83 @@ def test_admin_game_settings_proxy_for_direct_purrnet_match() -> None:
         )
         assert update.status_code == 200
         update_payload = update.json()
-        assert captured_update["match_id"] == "purrnet-live"
         assert captured_update["payload"]["impulse_to_color"] == 0.25
         assert update_payload["sections"][0]["meta"]["revision"] == 5
         assert update_payload["sections"][0]["fields"]["impulse_to_color"] == 0.25
+
+
+def test_admin_global_game_settings_falls_back_to_room_damage_config() -> None:
+    with build_client_with_admin(admin_token="secret-token", direct_observer_url="http://observer.local") as client:
+        runtime = client.app.state.runtime
+        captured_update: dict[str, object] = {}
+
+        async def fake_get_global_damage_config() -> dict[str, object] | None:
+            raise RuntimeError("global endpoint missing")
+
+        async def fake_update_global_damage_config(payload: dict[str, object]) -> dict[str, object] | None:
+            raise RuntimeError("global endpoint missing")
+
+        async def fake_list_rooms() -> list[dict[str, object]]:
+            return [{"room_id": "room_live_1", "match_id": "room_live_1"}]
+
+        async def fake_get_damage_config(match_id: str) -> dict[str, object] | None:
+            assert match_id == "room_live_1"
+            return {
+                "version": 1,
+                "revision": 8,
+                "updated_at_unix_ms": 1711459200999,
+                "source": "room_fallback",
+                "obstacle_tag": "Obstacle",
+                "impulse_to_color": 0.12,
+            }
+
+        async def fake_update_damage_config(match_id: str, payload: dict[str, object]) -> dict[str, object] | None:
+            assert match_id == "room_live_1"
+            captured_update["match_id"] = match_id
+            captured_update["payload"] = payload
+            return {
+                "version": 1,
+                "revision": 9,
+                "updated_at_unix_ms": 1711459201999,
+                "source": "room_fallback",
+                **payload,
+            }
+
+        runtime.direct_observer.get_global_damage_config = fake_get_global_damage_config
+        runtime.direct_observer.update_global_damage_config = fake_update_global_damage_config
+        runtime.direct_observer.list_rooms = fake_list_rooms
+        runtime.direct_observer.get_damage_config = fake_get_damage_config
+        runtime.direct_observer.update_damage_config = fake_update_damage_config
+
+        response = client.get("/api/v1/admin/game-settings", params={"token": "secret-token"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["scope"] == "global"
+        assert payload["source"] == "purrnet_direct"
+        assert payload["note"] == "Global settings are currently proxied through active room room_live_1."
+        assert payload["sections"][0]["fields"]["impulse_to_color"] == 0.12
+
+        update = client.put(
+            "/api/v1/admin/game-settings",
+            params={"token": "secret-token"},
+            json={
+                "sections": [
+                    {
+                        "section_id": "damage",
+                        "fields": {
+                            "obstacle_tag": "Obstacle",
+                            "impulse_to_color": 0.21,
+                        },
+                    }
+                ]
+            },
+        )
+        assert update.status_code == 200
+        update_payload = update.json()
+        assert captured_update["match_id"] == "room_live_1"
+        assert captured_update["payload"]["impulse_to_color"] == 0.21
+        assert update_payload["note"] == "Global settings were applied through active room room_live_1."
+        assert update_payload["sections"][0]["meta"]["revision"] == 9
 
 
 def test_authoritative_simulation_snapshot_overrides_client_state() -> None:

@@ -79,7 +79,7 @@
             switchTab("gameSettings");
         });
         elements.refreshGameSettingsButton.addEventListener("click", function () {
-            loadSelectedMatchGameSettings(true).then(render).catch(renderError);
+            loadGameSettings(true).then(render).catch(renderError);
         });
         window.addEventListener("beforeunload", closeSocket);
 
@@ -117,7 +117,7 @@
             syncSelectedLobbyFromList();
             syncSelectedMatchFromList();
 
-            await Promise.all([loadSelectedLobby(), loadSelectedMatch(), loadSelectedMatchGameSettings(true)]);
+            await Promise.all([loadSelectedLobby(), loadSelectedMatch(), loadGameSettings(true)]);
             render();
             setStatus(state.socket && state.socket.readyState === WebSocket.OPEN ? "connected" : "disconnected", "Snapshot synced");
         } catch (error) {
@@ -148,7 +148,6 @@
         const requestVersion = ++state.matchRequestVersion;
         if (!state.selectedMatchId) {
             state.selectedMatch = null;
-            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             return;
         }
@@ -163,7 +162,6 @@
             syncSelectedMatchPolling();
         } catch (error) {
             state.selectedMatch = null;
-            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             if (state.selectedMatchId) {
                 await refreshMatchesListSilently();
@@ -433,11 +431,9 @@
     }
 
     function syncSelectedMatchFromList() {
-        const previousMatchId = state.selectedMatchId;
         if (!state.matches.length) {
             state.selectedMatchId = null;
             state.selectedMatch = null;
-            clearSelectedGameSettings();
             syncSelectedMatchPolling();
             return;
         }
@@ -452,9 +448,6 @@
             return match.match_id === state.selectedMatchId;
         });
         state.selectedMatch = summary ? { ...summary, ...(state.selectedMatch || {}) } : null;
-        if (previousMatchId !== state.selectedMatchId) {
-            clearSelectedGameSettings();
-        }
         syncSelectedMatchPolling();
     }
 
@@ -468,9 +461,8 @@
     function selectMatch(matchId) {
         state.selectedMatchId = matchId;
         syncSelectedMatchFromList();
-        clearSelectedGameSettings();
         render();
-        Promise.all([loadSelectedMatch(), loadSelectedMatchGameSettings(true)]).then(render).catch(renderError);
+        loadSelectedMatch().then(render).catch(renderError);
     }
 
     function switchTab(tabId) {
@@ -495,22 +487,16 @@
         state.gameSettingsSavingSection = null;
     }
 
-    async function loadSelectedMatchGameSettings(forceReload) {
+    async function loadGameSettings(forceReload) {
         const requestVersion = ++state.gameSettingsRequestVersion;
-        if (!state.selectedMatchId) {
-            clearSelectedGameSettings();
-            return;
-        }
-
-        if (!forceReload && state.selectedGameSettings && state.selectedGameSettings.match_id === state.selectedMatchId) {
+        if (!forceReload && state.selectedGameSettings) {
             return;
         }
 
         state.gameSettingsLoading = true;
         try {
-            const matchId = state.selectedMatchId;
-            const payload = await apiGet(`/api/v1/admin/matches/${matchId}/game-settings`);
-            if (requestVersion !== state.gameSettingsRequestVersion || matchId !== state.selectedMatchId) {
+            const payload = await apiGet("/api/v1/admin/game-settings");
+            if (requestVersion !== state.gameSettingsRequestVersion) {
                 return;
             }
             state.selectedGameSettings = payload;
@@ -927,41 +913,41 @@
     }
 
     function renderGameSettings() {
-        const match = state.selectedMatch;
         const gameSettings = state.selectedGameSettings;
-        const hasMatch = Boolean(match);
-        const source = hasMatch ? (match.source || "backend_runtime") : "no match";
+        const source = gameSettings ? (gameSettings.source || "backend_runtime") : "backend_runtime";
         elements.gameSettingsSourceBadge.textContent = source;
-        elements.refreshGameSettingsButton.disabled = !hasMatch || state.gameSettingsLoading || state.gameSettingsSavingSection !== null;
+        elements.refreshGameSettingsButton.disabled = state.gameSettingsLoading || state.gameSettingsSavingSection !== null;
 
-        if (!match) {
+        if (state.gameSettingsLoading && !gameSettings) {
             elements.gameSettingsSummary.className = "empty-state";
-            elements.gameSettingsSummary.textContent = "Select a match to inspect runtime settings.";
+            elements.gameSettingsSummary.textContent = "Loading global runtime settings.";
+            elements.gameSettingsSections.className = "stack empty-state";
+            elements.gameSettingsSections.textContent = "Loading runtime settings.";
+            return;
+        }
+
+        if (!gameSettings) {
+            elements.gameSettingsSummary.className = "empty-state";
+            elements.gameSettingsSummary.textContent = "Global GameSettings are unavailable.";
             elements.gameSettingsSections.className = "stack empty-state";
             elements.gameSettingsSections.textContent = "No settings loaded.";
             return;
         }
 
         const summaryCards = [
-            { label: "match_id", value: match.match_id },
+            { label: "scope", value: gameSettings.scope || "global" },
             { label: "source", value: source },
-            { label: "room", value: match.room_id || "n/a" },
-            { label: "status", value: match.status || "n/a" },
+            { label: "sections", value: String((gameSettings.sections || []).length) },
+            { label: "note", value: gameSettings.note || "none" },
         ];
         elements.gameSettingsSummary.className = "fact-grid";
         elements.gameSettingsSummary.innerHTML = buildFactTiles(summaryCards);
 
-        if (state.gameSettingsLoading && !gameSettings) {
-            elements.gameSettingsSections.className = "stack empty-state";
-            elements.gameSettingsSections.textContent = "Loading runtime settings.";
-            return;
-        }
-
         if (!gameSettings || !Array.isArray(gameSettings.sections) || !gameSettings.sections.length) {
             elements.gameSettingsSections.className = "stack empty-state";
             elements.gameSettingsSections.textContent = source === "purrnet_direct"
-                ? "This match does not expose runtime settings yet."
-                : "Runtime GameSettings are currently available only for direct PurrNet matches.";
+                ? "Dedicated observer does not expose global settings yet."
+                : "Runtime GameSettings are currently available only for direct PurrNet observer-backed servers.";
             return;
         }
 
@@ -1069,11 +1055,6 @@
     }
 
     async function saveGameSettingsSection(sectionId) {
-        const match = state.selectedMatch;
-        if (!match || !state.selectedMatchId) {
-            return;
-        }
-
         const fields = state.gameSettingsDraftBySection[sectionId];
         if (!fields) {
             return;
@@ -1083,7 +1064,7 @@
         renderGameSettings();
         setStatus("syncing", `Saving ${sectionId} settings`);
         try {
-            const payload = await apiRequest(`/api/v1/admin/matches/${state.selectedMatchId}/game-settings`, {
+            const payload = await apiRequest("/api/v1/admin/game-settings", {
                 method: "PUT",
                 headers: {
                     "Content-Type": "application/json",

@@ -231,24 +231,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime.validate_admin_token(admin_token)
         return await runtime.get_admin_match(match_id)
 
-    @app.get(f"{settings.api_prefix}/admin/matches/{{match_id}}/game-settings", response_model=AdminGameSettingsResponse)
-    async def get_admin_match_game_settings(
-        match_id: str,
+    @app.get(f"{settings.api_prefix}/admin/game-settings", response_model=AdminGameSettingsResponse)
+    async def get_admin_game_settings(
         admin_token: str | None = Depends(get_admin_token),
         runtime: RuntimeState = Depends(get_runtime),
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
-        return await runtime.get_admin_match_game_settings(match_id)
+        return await runtime.get_admin_game_settings()
 
-    @app.put(f"{settings.api_prefix}/admin/matches/{{match_id}}/game-settings", response_model=AdminGameSettingsResponse)
-    async def update_admin_match_game_settings(
-        match_id: str,
+    @app.put(f"{settings.api_prefix}/admin/game-settings", response_model=AdminGameSettingsResponse)
+    async def update_admin_game_settings(
         request: AdminGameSettingsUpdateRequest,
         admin_token: str | None = Depends(get_admin_token),
         runtime: RuntimeState = Depends(get_runtime),
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
-        return await runtime.update_admin_match_game_settings(match_id, request.model_dump(mode="json"))
+        return await runtime.update_admin_game_settings(request.model_dump(mode="json"))
 
     @app.websocket(f"{settings.api_prefix}/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

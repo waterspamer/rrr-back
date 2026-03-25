@@ -304,6 +304,7 @@ class AdminGameSettingsSectionResponse(BaseModel):
 
 
 class AdminGameSettingsResponse(BaseModel):
-    match_id: str
+    scope: str = "global"
     source: str = "backend_runtime"
+    note: str | None = None
     sections: list[AdminGameSettingsSectionResponse] = Field(default_factory=list)
