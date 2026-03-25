@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     simulation_service_url: str = ""
     simulation_service_secret: str = ""
     simulation_service_request_timeout_sec: float = 5.0
+    direct_observer_url: str = ""
+    direct_observer_secret: str = ""
+    direct_observer_request_timeout_sec: float = 3.0
     docs_url: str | None = Field(default="/docs")
     redoc_url: str | None = Field(default="/redoc")
 

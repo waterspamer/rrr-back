@@ -25,6 +25,7 @@ from app.core.errors import (
     unauthorized,
 )
 from app.models import ConnectionState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
+from app.services.direct_observer_service import DirectObserverClient
 from app.services.simulation_service import SimulationServiceClient
 
 
@@ -148,6 +149,11 @@ class RuntimeState:
             secret=settings.simulation_service_secret,
             timeout_sec=settings.simulation_service_request_timeout_sec,
         )
+        self.direct_observer = DirectObserverClient(
+            base_url=settings.direct_observer_url,
+            secret=settings.direct_observer_secret,
+            timeout_sec=settings.direct_observer_request_timeout_sec,
+        )
         self.lock = asyncio.Lock()
         self.sessions_by_token: dict[str, Session] = {}
         self.lobbies_by_id: dict[str, Lobby] = {}
@@ -180,6 +186,7 @@ class RuntimeState:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self.simulation_service.close()
+        await self.direct_observer.close()
 
     def stats(self) -> dict[str, int]:
         return {
@@ -464,14 +471,20 @@ class RuntimeState:
     async def list_admin_matches(self) -> dict[str, Any]:
         async with self.lock:
             items = [self._serialize_admin_match_summary(match) for match in self._sorted_matches()]
+        items.extend(await self._list_direct_admin_matches())
+        items.sort(key=self._admin_match_sort_key)
         return {"items": items}
 
     async def get_admin_match(self, match_id: str) -> dict[str, Any]:
         async with self.lock:
             match = self.matches_by_id.get(match_id)
-            if match is None:
-                raise match_not_found()
-            return self._serialize_admin_match_detail(match)
+            if match is not None:
+                return self._serialize_admin_match_detail(match)
+
+        direct_match = await self._get_direct_admin_match(match_id)
+        if direct_match is not None:
+            return direct_match
+        raise match_not_found()
 
     async def close_lobby(self, lobby_id: str, *, reason: str) -> dict[str, Any]:
         async with self.lock:
@@ -1766,6 +1779,8 @@ class RuntimeState:
             "server_tick": match.server_tick,
             "room_id": match.room_id,
             "room_status": match.room_status,
+            "source": "backend_runtime",
+            "debug_summary": {},
         }
 
     def _serialize_admin_match_detail(self, match: Match) -> dict[str, Any]:
@@ -1782,11 +1797,335 @@ class RuntimeState:
             "room_http_url": match.room_http_url,
             "room_ws_url": match.room_ws_url,
             "room_token": match.room_token,
+            "source": "backend_runtime",
+            "debug_summary": {},
             "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
             "recent_collisions": list(match.recent_collisions),
             "raw_snapshot": raw_snapshot,
             "telemetry": self._get_match_metrics(match.match_id).as_dict(),
         }
+
+    async def _list_direct_admin_matches(self) -> list[dict[str, Any]]:
+        if not self.direct_observer.enabled:
+            return []
+
+        try:
+            rooms = await self.direct_observer.list_rooms()
+        except Exception:
+            logger.warning("direct_observer_list_failed", exc_info=True)
+            return []
+
+        room_items = [room for room in rooms if isinstance(room, dict)]
+        snapshot_results = await asyncio.gather(
+            *[
+                self.direct_observer.get_snapshot(str(room.get("match_id", "") or room.get("room_id", "") or ""))
+                for room in room_items
+            ],
+            return_exceptions=True,
+        )
+
+        items: list[dict[str, Any]] = []
+        for room, snapshot_result in zip(room_items, snapshot_results):
+            snapshot = snapshot_result if isinstance(snapshot_result, dict) else None
+            items.append(self._serialize_direct_admin_match_summary(room, snapshot))
+        return items
+
+    async def _get_direct_admin_match(self, match_id: str) -> dict[str, Any] | None:
+        if not self.direct_observer.enabled or not match_id:
+            return None
+
+        room_result, snapshot_result = await asyncio.gather(
+            self.direct_observer.get_room(match_id),
+            self.direct_observer.get_snapshot(match_id),
+            return_exceptions=True,
+        )
+        room = room_result if isinstance(room_result, dict) else {}
+        snapshot = snapshot_result if isinstance(snapshot_result, dict) else {}
+
+        if isinstance(room_result, Exception) and isinstance(snapshot_result, Exception):
+            logger.warning("direct_observer_match_failed match_id=%s", match_id, exc_info=True)
+            return None
+        if not room and not snapshot:
+            return None
+
+        return self._serialize_direct_admin_match_detail(match_id, room, snapshot)
+
+    def _serialize_direct_admin_match_summary(
+        self,
+        room: dict[str, Any],
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        match_id = str(room.get("match_id", "") or room.get("room_id", "") or "")
+        server_tick = self._safe_int(
+            snapshot.get("server_tick") if isinstance(snapshot, dict) else None,
+            self._safe_int(room.get("server_tick"), 0),
+        )
+        debug_summary = self._build_direct_admin_debug_summary(room, snapshot)
+        return {
+            "match_id": match_id,
+            "lobby_id": "direct_purrnet",
+            "status": str(
+                (snapshot.get("status") if isinstance(snapshot, dict) else None)
+                or room.get("status", "running")
+                or "running"
+            ),
+            "map_id": str(
+                (snapshot.get("map_id") if isinstance(snapshot, dict) else None)
+                or room.get("map_id", "city_default")
+                or "city_default"
+            ),
+            "player_count": self._safe_int(room.get("player_count"), debug_summary.get("player_count", 0)),
+            "server_tick": server_tick,
+            "room_id": str(room.get("room_id", match_id) or match_id),
+            "room_status": str(
+                (snapshot.get("status") if isinstance(snapshot, dict) else None)
+                or room.get("status", "running")
+                or "running"
+            ),
+            "source": "purrnet_direct",
+            "debug_summary": debug_summary,
+        }
+
+    def _serialize_direct_admin_match_detail(
+        self,
+        match_id: str,
+        room: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        observer = snapshot.get("observer") if isinstance(snapshot.get("observer"), dict) else {}
+        tracked_players = observer.get("tracked_players") if isinstance(observer.get("tracked_players"), list) else []
+        tracked_by_id = {
+            str(item.get("player_id", "") or ""): item
+            for item in tracked_players
+            if isinstance(item, dict) and str(item.get("player_id", "") or "")
+        }
+        damage_by_player = {
+            str(item.get("player_id", "") or ""): item
+            for item in (snapshot.get("damage_states") if isinstance(snapshot.get("damage_states"), list) else [])
+            if isinstance(item, dict) and str(item.get("player_id", "") or "")
+        }
+        server_time = self._safe_int(snapshot.get("server_time"), int(time.time() * 1000))
+        active_ids: set[str] = set()
+        players: list[dict[str, Any]] = []
+
+        snapshot_players = snapshot.get("players") if isinstance(snapshot.get("players"), list) else []
+        for index, item in enumerate(snapshot_players):
+            if not isinstance(item, dict):
+                continue
+            player_id = str(item.get("player_id", "") or "")
+            if not player_id:
+                continue
+            active_ids.add(player_id)
+            players.append(
+                self._serialize_direct_admin_match_player(
+                    player_payload=item,
+                    tracked_payload=tracked_by_id.get(player_id),
+                    damage_payload=damage_by_player.get(player_id),
+                    index=index,
+                    server_time_ms=server_time,
+                )
+            )
+
+        for tracked in tracked_players:
+            if not isinstance(tracked, dict):
+                continue
+            player_id = str(tracked.get("player_id", "") or "")
+            if not player_id or player_id in active_ids:
+                continue
+            players.append(
+                self._serialize_direct_admin_match_player(
+                    player_payload=None,
+                    tracked_payload=tracked,
+                    damage_payload=damage_by_player.get(player_id),
+                    index=len(players),
+                    server_time_ms=server_time,
+                )
+            )
+
+        tick_rate = self._safe_int(room.get("tick_rate"), self._safe_int((observer.get("network") or {}).get("tick_rate"), 30))
+        status = str(snapshot.get("status", "") or room.get("status", "") or "running")
+        raw_snapshot = snapshot or room
+        return {
+            "match_id": match_id,
+            "lobby_id": "direct_purrnet",
+            "status": status,
+            "map_id": str(snapshot.get("map_id", "") or room.get("map_id", "") or "city_default"),
+            "tick_rate": tick_rate,
+            "server_tick": self._safe_int(snapshot.get("server_tick"), self._safe_int(room.get("server_tick"), 0)),
+            "room_id": str(room.get("room_id", "") or snapshot.get("room_id", "") or match_id),
+            "room_status": status,
+            "room_http_url": str(room.get("room_http_url", "") or "") or None,
+            "room_ws_url": str(room.get("room_ws_url", "") or "") or None,
+            "room_token": str(room.get("room_token", "") or "") or None,
+            "source": "purrnet_direct",
+            "debug_summary": self._build_direct_admin_debug_summary(room, snapshot),
+            "players": players,
+            "recent_collisions": snapshot.get("collisions") if isinstance(snapshot.get("collisions"), list) else [],
+            "raw_snapshot": raw_snapshot,
+            "telemetry": self._build_direct_admin_telemetry(raw_snapshot),
+        }
+
+    def _serialize_direct_admin_match_player(
+        self,
+        *,
+        player_payload: dict[str, Any] | None,
+        tracked_payload: dict[str, Any] | None,
+        damage_payload: dict[str, Any] | None,
+        index: int,
+        server_time_ms: int,
+    ) -> dict[str, Any]:
+        player_payload = player_payload or {}
+        tracked_payload = tracked_payload or {}
+        player_id = str(player_payload.get("player_id", "") or tracked_payload.get("player_id", "") or f"direct_{index}")
+        connection_state = str(
+            player_payload.get("connection_state", "")
+            or ("queued" if tracked_payload.get("queued") and not tracked_payload.get("spawned") else "in_game")
+        )
+        spawn_position_vec = self._coerce_vec3(
+            player_payload.get("spawn_position") if isinstance(player_payload.get("spawn_position"), dict) else tracked_payload.get("spawn_position"),
+            Vec3(),
+        )
+        spawn_rotation_vec = self._coerce_vec3(
+            player_payload.get("spawn_rotation") if isinstance(player_payload.get("spawn_rotation"), dict) else tracked_payload.get("spawn_rotation"),
+            Vec3(),
+        )
+        position_vec = self._coerce_vec3(player_payload.get("position"), spawn_position_vec)
+        rotation_vec = self._coerce_vec3(player_payload.get("rotation"), spawn_rotation_vec)
+        velocity_vec = self._coerce_vec3(player_payload.get("velocity"), Vec3())
+        angular_velocity_vec = self._coerce_vec3(player_payload.get("angular_velocity"), Vec3())
+        speed = (velocity_vec.x**2 + velocity_vec.y**2 + velocity_vec.z**2) ** 0.5
+        input_payload = player_payload.get("input") if isinstance(player_payload.get("input"), dict) else {}
+        car_config = player_payload.get("car_config") if isinstance(player_payload.get("car_config"), dict) else {}
+        if not car_config and isinstance(tracked_payload.get("car_config"), dict):
+            car_config = tracked_payload.get("car_config")
+
+        debug = dict(player_payload.get("debug") if isinstance(player_payload.get("debug"), dict) else {})
+        if tracked_payload:
+            debug["tracked_is_bot"] = bool(tracked_payload.get("is_bot", False))
+            debug["tracked_queued"] = bool(tracked_payload.get("queued", False))
+            debug["tracked_spawned"] = bool(tracked_payload.get("spawned", False))
+            debug["tracked_spawn_slot"] = self._safe_int(tracked_payload.get("spawn_slot"), -1)
+            if tracked_payload.get("last_spawn_failure_reason"):
+                debug["last_spawn_failure_reason"] = tracked_payload.get("last_spawn_failure_reason")
+        if car_config:
+            debug.setdefault("loadout_name", car_config.get("loadout_name"))
+            debug.setdefault("loadout_display_name", car_config.get("loadout_display_name"))
+
+        damage_revision = self._safe_int(damage_payload.get("revision") if damage_payload else None, -1)
+        damage_width = self._safe_int(damage_payload.get("width") if damage_payload else None, 0)
+        damage_height = self._safe_int(damage_payload.get("height") if damage_payload else None, 0)
+        damage_map_b64 = str(damage_payload.get("map_b64", "") or "") if damage_payload else None
+        last_snapshot_at = datetime.utcfromtimestamp(max(0, server_time_ms) / 1000.0).isoformat() + "Z"
+
+        return {
+            "player_id": player_id,
+            "player_name": str(player_payload.get("player_name", "") or player_id),
+            "connection_state": connection_state,
+            "is_server_controlled": bool(player_payload.get("is_server_controlled", tracked_payload.get("is_bot", False))),
+            "authority_order": self._safe_int(player_payload.get("authority_order"), self._safe_int(tracked_payload.get("spawn_slot"), index)),
+            "spawn_point_id": str(
+                player_payload.get("spawn_point_id", "")
+                or tracked_payload.get("spawn_point_id", "")
+                or f"purr_slot_{index}"
+            ),
+            "spawn_position": spawn_position_vec.as_dict(),
+            "spawn_rotation": spawn_rotation_vec.as_dict(),
+            "position": position_vec.as_dict(),
+            "rotation": rotation_vec.as_dict(),
+            "velocity": velocity_vec.as_dict(),
+            "angular_velocity": angular_velocity_vec.as_dict(),
+            "speed": round(speed, 3),
+            "last_snapshot_at": last_snapshot_at,
+            "client_time_ms": self._safe_int(player_payload.get("client_time"), 0),
+            "server_received_time_ms": self._safe_int(player_payload.get("server_received_time"), server_time_ms),
+            "last_input_seq": self._safe_int(player_payload.get("ack_input_seq"), 0),
+            "throttle": round(float(input_payload.get("throttle", 0.0) or 0.0), 3),
+            "steer": round(float(input_payload.get("steer", 0.0) or 0.0), 3),
+            "brake": bool(input_payload.get("brake", False)),
+            "handbrake": bool(input_payload.get("handbrake", False)),
+            "nitro": bool(input_payload.get("nitro", False)),
+            "car_config": car_config,
+            "wheel_state_count": len(player_payload.get("wheel_states", [])) if isinstance(player_payload.get("wheel_states"), list) else 0,
+            "damage_revision": damage_revision,
+            "damage_width": damage_width,
+            "damage_height": damage_height,
+            "damage_map_bytes": len(damage_map_b64.encode("utf-8")) if damage_map_b64 else 0,
+            "damage_map_b64": damage_map_b64,
+            "last_damage_at": last_snapshot_at if damage_revision >= 0 else None,
+            "debug": debug,
+        }
+
+    def _build_direct_admin_debug_summary(self, room: dict[str, Any], snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        observer = snapshot.get("observer") if isinstance(snapshot, dict) and isinstance(snapshot.get("observer"), dict) else {}
+        counts = observer.get("counts") if isinstance(observer.get("counts"), dict) else {}
+        spawner = observer.get("spawner") if isinstance(observer.get("spawner"), dict) else {}
+        return {
+            "player_count": self._safe_int(room.get("player_count"), self._safe_int(counts.get("active_player_cars"), 0)),
+            "tracked_players": self._safe_int(counts.get("tracked_players"), 0),
+            "queued_players": self._safe_int(spawner.get("queued_players"), 0),
+            "spawned_players": self._safe_int(spawner.get("spawned_players"), 0),
+            "bot_target": self._safe_int(spawner.get("solo_bot_target"), 0),
+            "tracked_bot_players": self._safe_int(spawner.get("tracked_bot_players"), 0),
+            "transient_cleanup_enabled": bool(spawner.get("transient_solo_cleanup_enabled", False)),
+            "solo_session_active": bool(spawner.get("solo_session_active", False)),
+            "solo_session_human_player_id": str(spawner.get("solo_session_human_player_id", "") or ""),
+            "solo_session_status": str(spawner.get("solo_session_status", "") or ""),
+            "solo_idle_timeout_sec": self._safe_float(spawner.get("solo_idle_timeout_sec"), 0.0),
+            "seconds_since_last_human_seen": self._safe_float(spawner.get("seconds_since_last_human_seen"), -1.0),
+            "seconds_since_last_input": self._safe_float(spawner.get("seconds_since_last_meaningful_input"), -1.0),
+            "seconds_until_idle_close": self._safe_float(spawner.get("seconds_until_idle_close"), -1.0),
+            "last_close_reason": str(spawner.get("last_solo_session_close_reason", "") or ""),
+            "seconds_since_last_close": self._safe_float(spawner.get("seconds_since_last_solo_session_close"), -1.0),
+            "room_visible": bool(observer.get("room_visible", True)),
+            "scene_name": str(room.get("scene_name", "") or observer.get("scene_name", "") or ""),
+            "mode": str(observer.get("mode", "") or ""),
+        }
+
+    def _build_direct_admin_telemetry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        observer = payload.get("observer") if isinstance(payload.get("observer"), dict) else {}
+        return {
+            "observer": {
+                "source": observer.get("source", "purrnet_direct"),
+                "mode": observer.get("mode", "Server"),
+                "scene_name": observer.get("scene_name"),
+                "started_at_utc": observer.get("started_at_utc"),
+                "uptime_sec": observer.get("uptime_sec"),
+            },
+            "network": observer.get("network", {}) if isinstance(observer.get("network"), dict) else {},
+            "prediction": observer.get("prediction", {}) if isinstance(observer.get("prediction"), dict) else {},
+            "spawner": observer.get("spawner", {}) if isinstance(observer.get("spawner"), dict) else {},
+            "counts": observer.get("counts", {}) if isinstance(observer.get("counts"), dict) else {},
+        }
+
+    @staticmethod
+    def _admin_match_sort_key(match: dict[str, Any]) -> tuple[int, int, str]:
+        priority = {
+            "running": 0,
+            "starting": 1,
+            "finished": 2,
+            "aborted": 3,
+        }
+        status = str(match.get("status", "") or "")
+        server_tick = 0
+        try:
+            server_tick = int(match.get("server_tick", 0) or 0)
+        except (TypeError, ValueError):
+            server_tick = 0
+        return (priority.get(status, 99), -server_tick, str(match.get("match_id", "") or ""))
+
+    @staticmethod
+    def _safe_int(value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _safe_float(value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
 
     def _get_map_spawn_points(self, map_id: str) -> list[SpawnPoint]:
         spawn_points = MAP_SPAWN_POINTS.get(map_id)
@@ -1897,6 +2236,7 @@ class RuntimeState:
                 "server_tick": snapshot["server_tick"],
                 "room_id": match.room_id,
                 "room_status": match.room_status,
+                "source": "backend_runtime",
                 "players": [self._serialize_admin_match_player(match, player) for player in match.players.values()],
                 "recent_collisions": list(match.recent_collisions),
                 "telemetry": self._get_match_metrics(match_id).as_dict(),

@@ -114,10 +114,16 @@
                             <tr>
                                 <th>player_id</th>
                                 <th>player_name</th>
+                                <th>source</th>
                                 <th>x</th>
                                 <th>y</th>
                                 <th>z</th>
+                                <th>rot_x</th>
                                 <th>rot_y</th>
+                                <th>rot_z</th>
+                                <th>vx</th>
+                                <th>vy</th>
+                                <th>vz</th>
                                 <th>speed</th>
                                 <th>ack</th>
                                 <th>grounded</th>
@@ -128,6 +134,11 @@
                             <tbody id="playersTable"></tbody>
                         </table>
                     </div>
+                    <div class="panel-head nested-head">
+                        <h2>Player Debug</h2>
+                        <span class="badge">live state / loadout / spawn info</span>
+                    </div>
+                    <div id="matchPlayersDebug" class="stack empty-state">Select a match to inspect player debug state.</div>
                     <div class="panel-head nested-head">
                         <h2>Damage Maps</h2>
                         <span class="badge">live relay preview</span>

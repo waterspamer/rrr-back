@@ -12,6 +12,8 @@
         manualClose: false,
         lobbyRequestVersion: 0,
         matchRequestVersion: 0,
+        matchPollTimer: null,
+        matchListPollTimer: null,
     };
 
     const elements = {
@@ -40,6 +42,7 @@
         matchSummary: document.getElementById("matchSummary"),
         networkStats: document.getElementById("networkStats"),
         playersTable: document.getElementById("playersTable"),
+        matchPlayersDebug: document.getElementById("matchPlayersDebug"),
         damageMaps: document.getElementById("damageMaps"),
         collisionFeed: document.getElementById("collisionFeed"),
         rawSnapshot: document.getElementById("rawSnapshot"),
@@ -56,7 +59,10 @@
         elements.killLobbyButton.addEventListener("click", killSelectedLobby);
         window.addEventListener("beforeunload", closeSocket);
 
-        refreshAll().finally(connectSocket);
+        refreshAll().finally(function () {
+            connectSocket();
+            startMatchListPolling();
+        });
     }
 
     function applyToken() {
@@ -69,7 +75,10 @@
         }
         window.history.replaceState({}, "", url);
         closeSocket();
-        refreshAll().finally(connectSocket);
+        refreshAll().finally(function () {
+            connectSocket();
+            startMatchListPolling();
+        });
     }
 
     async function refreshAll() {
@@ -115,6 +124,7 @@
         const requestVersion = ++state.matchRequestVersion;
         if (!state.selectedMatchId) {
             state.selectedMatch = null;
+            syncSelectedMatchPolling();
             return;
         }
         try {
@@ -124,10 +134,56 @@
                 return;
             }
             state.selectedMatch = payload;
+            upsertById(state.matches, toMatchSummary(payload), "match_id");
+            syncSelectedMatchPolling();
         } catch (error) {
             state.selectedMatch = null;
+            syncSelectedMatchPolling();
+            if (state.selectedMatchId) {
+                await refreshMatchesListSilently();
+            }
             renderError(error);
         }
+    }
+
+    function clearMatchPollTimer() {
+        if (state.matchPollTimer) {
+            window.clearTimeout(state.matchPollTimer);
+            state.matchPollTimer = null;
+        }
+    }
+
+    function startMatchListPolling() {
+        clearMatchListPollTimer();
+        state.matchListPollTimer = window.setInterval(function () {
+            refreshMatchesListSilently().catch(function () {
+                return null;
+            });
+        }, 3000);
+    }
+
+    function clearMatchListPollTimer() {
+        if (state.matchListPollTimer) {
+            window.clearInterval(state.matchListPollTimer);
+            state.matchListPollTimer = null;
+        }
+    }
+
+    async function refreshMatchesListSilently() {
+        const matches = await apiGet("/api/v1/admin/matches");
+        state.matches = Array.isArray(matches.items) ? matches.items : [];
+        syncSelectedMatchFromList();
+        render();
+    }
+
+    function syncSelectedMatchPolling() {
+        clearMatchPollTimer();
+        if (!state.selectedMatch || state.selectedMatch.source !== "purrnet_direct") {
+            return;
+        }
+        state.matchPollTimer = window.setTimeout(function () {
+            loadSelectedMatch().then(render).catch(renderError);
+        }, 1000);
     }
 
     async function apiRequest(path, options) {
@@ -193,6 +249,7 @@
 
     function connectSocket() {
         closeSocket();
+        startMatchListPolling();
         const url = new URL(window.location.origin.replace("http", "ws") + "/api/v1/admin/ws");
         if (state.token) {
             url.searchParams.set("token", state.token);
@@ -225,6 +282,8 @@
     }
 
     function closeSocket() {
+        clearMatchPollTimer();
+        clearMatchListPollTimer();
         if (state.reconnectTimer) {
             window.clearTimeout(state.reconnectTimer);
             state.reconnectTimer = null;
@@ -270,6 +329,7 @@
                     server_tick: payload.server_tick,
                     room_id: payload.room_id,
                     room_status: payload.room_status,
+                    source: payload.source || "backend_runtime",
                 }, "match_id");
                 if (state.selectedMatchId === payload.match_id) {
                     const previous = state.selectedMatch || {};
@@ -279,6 +339,7 @@
                         server_tick: payload.server_tick,
                         room_id: payload.room_id || previous.room_id || null,
                         room_status: payload.room_status || previous.room_status || null,
+                        source: payload.source || previous.source || "backend_runtime",
                         players: payload.players || [],
                         recent_collisions: payload.recent_collisions || previous.recent_collisions || [],
                         telemetry: payload.telemetry || previous.telemetry || null,
@@ -293,6 +354,7 @@
             default:
                 break;
         }
+        syncSelectedMatchPolling();
         render();
     }
 
@@ -318,6 +380,10 @@
             map_id: match.map_id,
             player_count: Array.isArray(match.players) ? match.players.length : 0,
             server_tick: match.server_tick || 0,
+            room_id: match.room_id || null,
+            room_status: match.room_status || null,
+            source: match.source || "backend_runtime",
+            debug_summary: match.debug_summary || {},
         };
     }
 
@@ -344,6 +410,7 @@
         if (!state.matches.length) {
             state.selectedMatchId = null;
             state.selectedMatch = null;
+            syncSelectedMatchPolling();
             return;
         }
 
@@ -357,6 +424,7 @@
             return match.match_id === state.selectedMatchId;
         });
         state.selectedMatch = summary ? { ...summary, ...(state.selectedMatch || {}) } : null;
+        syncSelectedMatchPolling();
     }
 
     function selectLobby(lobbyId) {
@@ -432,13 +500,13 @@
         wrapper.className = "lobby-players";
 
         const summary = document.createElement("div");
-        summary.className = "match-summary";
-        summary.innerHTML = [
-            `<div class="small">owner</div><strong>${escapeHtml(lobby.owner_player_id)}</strong>`,
-            `<div class="small">slots</div><strong>${lobby.current_players}/${lobby.max_players}</strong>`,
-            `<div class="small">match</div><strong>${escapeHtml(lobby.match_id || "none")}</strong>`,
-            `<div class="small">expires_at</div><strong>${escapeHtml(lobby.expires_at || "n/a")}</strong>`,
-        ].join(" ");
+        summary.className = "fact-grid";
+        summary.innerHTML = buildFactTiles([
+            { label: "owner", value: lobby.owner_player_id },
+            { label: "slots", value: `${lobby.current_players}/${lobby.max_players}` },
+            { label: "match", value: lobby.match_id || "none" },
+            { label: "expires_at", value: lobby.expires_at || "n/a" },
+        ]);
         wrapper.appendChild(summary);
 
         (lobby.players || []).forEach(function (player) {
@@ -482,15 +550,21 @@
     function renderMatchDetail() {
         const match = state.selectedMatch;
         elements.selectedMatchLabel.textContent = match ? match.match_id : "none";
-        elements.selectedMatchMeta.textContent = match ? `${match.status || "unknown"} on ${match.map_id || "n/a"}` : "pick a match from the list";
+        elements.selectedMatchMeta.textContent = match
+            ? `${match.status || "unknown"} on ${match.map_id || "n/a"} via ${match.source || "backend_runtime"}`
+            : "pick a match from the list";
         elements.serverTickLabel.textContent = String(match ? match.server_tick || 0 : 0);
-        elements.serverTickMeta.textContent = match ? `lobby ${match.lobby_id || "n/a"}` : "updates on every admin_match_state";
+        elements.serverTickMeta.textContent = match
+            ? (match.source === "purrnet_direct" ? "polled from direct dedicated observer" : `lobby ${match.lobby_id || "n/a"}`)
+            : "updates on every admin_match_state";
         renderPill(elements.matchStatusPill, match ? match.status : "idle");
 
         if (!match) {
             elements.matchSummary.className = "match-summary empty-state";
             elements.matchSummary.textContent = "Select a match to inspect.";
             elements.playersTable.replaceChildren();
+            elements.matchPlayersDebug.className = "stack empty-state";
+            elements.matchPlayersDebug.textContent = "Select a match to inspect player debug state.";
             elements.damageMaps.className = "damage-grid empty-state";
             elements.damageMaps.textContent = "Select a match to inspect damage textures.";
             elements.collisionFeed.className = "stack empty-state";
@@ -501,37 +575,87 @@
         }
 
         elements.matchSummary.className = "match-summary";
-        elements.matchSummary.innerHTML = `
-            <div class="small">match_id</div><strong>${escapeHtml(match.match_id)}</strong>
-            <div class="small">map / tick_rate</div><strong>${escapeHtml(match.map_id || "n/a")} / ${escapeHtml(String(match.tick_rate || "n/a"))}</strong>
-            <div class="small">players</div><strong>${escapeHtml(String((match.players || []).length))}</strong>
-            <div class="small">room</div><strong>${escapeHtml(match.room_status || "n/a")}</strong>
-            <div class="small">room_id</div><strong>${escapeHtml(match.room_id || "n/a")}</strong>
-        `;
+        elements.matchSummary.innerHTML = renderMatchSummary(match);
 
         elements.playersTable.replaceChildren();
         (match.players || []).forEach(function (player) {
+            const debug = player.debug || {};
             const tr = document.createElement("tr");
             tr.innerHTML = `
                 <td>${escapeHtml(player.player_id)}</td>
                 <td>${escapeHtml(player.player_name || "n/a")}</td>
+                <td>${escapeHtml(player.is_server_controlled ? "bot/server" : "player")}</td>
                 <td>${formatNumber(player.position && player.position.x)}</td>
                 <td>${formatNumber(player.position && player.position.y)}</td>
                 <td>${formatNumber(player.position && player.position.z)}</td>
+                <td>${formatNumber(player.rotation && player.rotation.x)}</td>
                 <td>${formatNumber(player.rotation && player.rotation.y)}</td>
+                <td>${formatNumber(player.rotation && player.rotation.z)}</td>
+                <td>${formatNumber(player.velocity && player.velocity.x)}</td>
+                <td>${formatNumber(player.velocity && player.velocity.y)}</td>
+                <td>${formatNumber(player.velocity && player.velocity.z)}</td>
                 <td>${formatNumber(player.speed)}</td>
                 <td>${escapeHtml(String(player.last_input_seq != null ? player.last_input_seq : "n/a"))}</td>
-                <td>${escapeHtml(String(player.debug && player.debug.grounded_wheels != null ? player.debug.grounded_wheels : "n/a"))}</td>
+                <td>${escapeHtml(String(debug.grounded_wheels != null ? debug.grounded_wheels : "n/a"))}</td>
                 <td>${escapeHtml(String(player.damage_revision || 0))}</td>
                 <td>${escapeHtml(player.connection_state || "unknown")}</td>
             `;
             elements.playersTable.appendChild(tr);
         });
 
+        renderMatchPlayersDebug(match.players || []);
         renderDamageMaps(match.players || []);
         renderCollisionFeed(match.recent_collisions || []);
         elements.rawSnapshot.textContent = JSON.stringify(match.raw_snapshot || match, null, 2);
         drawMap(match.players || []);
+    }
+
+    function renderMatchPlayersDebug(players) {
+        if (!Array.isArray(players) || !players.length) {
+            elements.matchPlayersDebug.className = "stack empty-state";
+            elements.matchPlayersDebug.textContent = "Waiting for player debug data.";
+            return;
+        }
+
+        const cards = players.map(function (player) {
+            const debug = player.debug || {};
+            const carConfig = player.car_config || {};
+            const customizations = Array.isArray(carConfig.customizations)
+                ? carConfig.customizations.map(function (item) {
+                    return `${item.selector_path}:${item.variant_name}`;
+                }).join(", ")
+                : "";
+            const card = document.createElement("article");
+            card.className = "player-card";
+            card.innerHTML = `
+                <div class="item-title">
+                    <span>${escapeHtml(player.player_name || player.player_id)}</span>
+                    <span class="badge">${escapeHtml(player.connection_state || "unknown")}</span>
+                </div>
+                <p class="card-meta">${escapeHtml(player.player_id)}</p>
+                <div class="player-grid">
+                    <div><div class="small">loadout</div><strong>${escapeHtml(carConfig.loadout_display_name || carConfig.loadout_name || debug.loadout_display_name || debug.loadout_name || "n/a")}</strong></div>
+                    <div><div class="small">config</div><strong>${escapeHtml(debug.resolved_car_config_name || "n/a")}</strong></div>
+                    <div><div class="small">spawn</div><strong>${formatNumber(player.spawn_position && player.spawn_position.x)}, ${formatNumber(player.spawn_position && player.spawn_position.y)}, ${formatNumber(player.spawn_position && player.spawn_position.z)}</strong></div>
+                    <div><div class="small">position</div><strong>${formatNumber(player.position && player.position.x)}, ${formatNumber(player.position && player.position.y)}, ${formatNumber(player.position && player.position.z)}</strong></div>
+                    <div><div class="small">velocity</div><strong>${formatNumber(player.velocity && player.velocity.x)}, ${formatNumber(player.velocity && player.velocity.y)}, ${formatNumber(player.velocity && player.velocity.z)}</strong></div>
+                    <div><div class="small">rotation</div><strong>${formatNumber(player.rotation && player.rotation.x)}, ${formatNumber(player.rotation && player.rotation.y)}, ${formatNumber(player.rotation && player.rotation.z)}</strong></div>
+                    <div><div class="small">gear / rpm</div><strong>${escapeHtml(String(debug.current_gear != null ? debug.current_gear : "n/a"))} / ${formatNumber(debug.current_rpm)}</strong></div>
+                    <div><div class="small">torque / speed</div><strong>${formatNumber(debug.motor_torque)} / ${formatNumber(debug.speed_kph)}</strong></div>
+                    <div><div class="small">grounded / wheels</div><strong>${escapeHtml(String(debug.grounded_wheels != null ? debug.grounded_wheels : "n/a"))} / ${escapeHtml(String(debug.wheel_count != null ? debug.wheel_count : "n/a"))}</strong></div>
+                    <div><div class="small">nitro</div><strong>${formatNumber(debug.nitro_amount)} (${escapeHtml(String(Boolean(debug.nitro_active)))})</strong></div>
+                    <div><div class="small">damage</div><strong>rev ${escapeHtml(String(player.damage_revision != null ? player.damage_revision : "n/a"))} / ${escapeHtml(`${player.damage_width || 0}x${player.damage_height || 0}`)}</strong></div>
+                    <div><div class="small">spawn flags</div><strong>${escapeHtml(`queued=${Boolean(debug.tracked_queued)} spawned=${Boolean(debug.tracked_spawned)}`)}</strong></div>
+                    <div><div class="small">inputs</div><strong>${escapeHtml(`thr=${player.throttle ?? 0} steer=${player.steer ?? 0} brake=${Boolean(player.brake)} hb=${Boolean(player.handbrake)} nitro=${Boolean(player.nitro)}`)}</strong></div>
+                    <div><div class="small">failure</div><code>${escapeHtml(debug.last_spawn_failure_reason || "none")}</code></div>
+                    <div><div class="small">customizations</div><code>${escapeHtml(customizations || "none")}</code></div>
+                </div>
+            `;
+            return card;
+        });
+
+        elements.matchPlayersDebug.className = "stack";
+        elements.matchPlayersDebug.replaceChildren(...cards);
     }
 
     function renderDamageMaps(players) {
@@ -648,6 +772,29 @@
         }
 
         const telemetry = match.telemetry;
+        if (match.source === "purrnet_direct") {
+            const groups = [
+                { title: "Observer", payload: telemetry.observer },
+                { title: "Network", payload: telemetry.network },
+                { title: "Prediction", payload: telemetry.prediction },
+                { title: "Spawner", payload: telemetry.spawner },
+                { title: "Counts", payload: telemetry.counts },
+            ].filter(function (group) {
+                return group.payload && typeof group.payload === "object";
+            });
+
+            const cards = groups.map(function (group) {
+                const lines = Object.keys(group.payload).map(function (key) {
+                    return metricLine(key.replace(/_/g, " "), group.payload[key]);
+                });
+                return createTelemetryCard(group.title, null, lines);
+            });
+
+            elements.networkStats.className = "telemetry-grid";
+            elements.networkStats.replaceChildren(...cards);
+            return;
+        }
+
         const cards = [
             createTelemetryCard("Player Input In", telemetry.player_input_in, [
                 metricLine("msg/s", telemetry.player_input_in && telemetry.player_input_in.messages_per_sec),
@@ -813,14 +960,62 @@
     }
 
     function formatMatchCard(match) {
+        const debugSummary = match.debug_summary || {};
+        const cleanupLine = debugSummary.transient_cleanup_enabled
+            ? `<p class="card-accent">solo ${escapeHtml(debugSummary.solo_session_status || (debugSummary.solo_session_active ? "active" : "idle"))} | idle ${escapeHtml(formatDuration(debugSummary.seconds_until_idle_close))}</p>`
+            : "";
         return `
             <div class="item-title">
                 <span>${escapeHtml(match.match_id)}</span>
                 <span class="badge">${escapeHtml(match.status)}</span>
             </div>
-            <p class="card-meta">${escapeHtml(match.lobby_id || "no lobby")}</p>
-            <p>${escapeHtml(match.map_id || "n/a")} | tick ${escapeHtml(String(match.server_tick || 0))} | players ${escapeHtml(String(match.player_count || 0))}</p>
+            <p class="card-meta">${escapeHtml(match.lobby_id || "no lobby")} | ${escapeHtml(match.source || "backend_runtime")}</p>
+            <p>${escapeHtml(match.map_id || "n/a")} | tick ${escapeHtml(String(match.server_tick || 0))} | players ${escapeHtml(String(match.player_count || debugSummary.player_count || 0))}</p>
+            ${cleanupLine}
         `;
+    }
+
+    function renderMatchSummary(match) {
+        const debugSummary = match.debug_summary || {};
+        const cards = [
+            { label: "match_id", value: match.match_id },
+            { label: "map / tick_rate", value: `${match.map_id || "n/a"} / ${match.tick_rate || "n/a"}` },
+            { label: "players", value: String((match.players || []).length) },
+            { label: "source", value: match.source || "backend_runtime" },
+            { label: "room", value: match.room_status || "n/a" },
+            { label: "room_id", value: match.room_id || "n/a" },
+        ];
+
+        if (debugSummary.transient_cleanup_enabled) {
+            cards.push(
+                { label: "solo session", value: debugSummary.solo_session_status || (debugSummary.solo_session_active ? "active" : "idle") },
+                { label: "human player", value: debugSummary.solo_session_human_player_id || "n/a" },
+                { label: "idle timeout", value: formatDuration(debugSummary.solo_idle_timeout_sec) },
+                { label: "time to close", value: formatDuration(debugSummary.seconds_until_idle_close) },
+                { label: "last input", value: debugSummary.seconds_since_last_input >= 0 ? `${formatDuration(debugSummary.seconds_since_last_input)} ago` : "n/a" },
+                {
+                    label: "last close",
+                    value: debugSummary.last_close_reason
+                        ? (debugSummary.seconds_since_last_close >= 0
+                            ? `${debugSummary.last_close_reason} | ${formatDuration(debugSummary.seconds_since_last_close)} ago`
+                            : debugSummary.last_close_reason)
+                        : "n/a"
+                },
+            );
+        }
+
+        return `<div class="fact-grid">${buildFactTiles(cards)}</div>`;
+    }
+
+    function buildFactTiles(items) {
+        return items.map(function (item) {
+            return `
+                <article class="fact-tile">
+                    <div class="small">${escapeHtml(item.label)}</div>
+                    <strong>${escapeHtml(item.value == null ? "n/a" : String(item.value))}</strong>
+                </article>
+            `;
+        }).join("");
     }
 
     function renderPill(element, status) {
@@ -839,6 +1034,17 @@
     function formatNumber(value) {
         const number = Number(value);
         return Number.isFinite(number) ? number.toFixed(2) : "0.00";
+    }
+
+    function formatDuration(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number < 0) {
+            return "n/a";
+        }
+        if (number >= 60) {
+            return `${(number / 60).toFixed(1)}m`;
+        }
+        return `${number.toFixed(1)}s`;
     }
 
     function escapeHtml(value) {

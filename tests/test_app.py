@@ -588,6 +588,168 @@ def test_admin_websocket_receives_realtime_match_updates() -> None:
                 assert any(player["damage_revision"] == 1 for player in detail_payload["players"])
 
 
+def test_admin_rest_includes_direct_purrnet_observer_match() -> None:
+    with build_client_with_admin(admin_token="secret-token", direct_observer_url="http://observer.local") as client:
+        runtime = client.app.state.runtime
+
+        async def fake_list_rooms() -> list[dict[str, object]]:
+            return [
+                {
+                    "room_id": "purrnet-live",
+                    "match_id": "purrnet-live",
+                    "source": "purrnet_direct",
+                    "map_id": "city_default",
+                    "status": "running",
+                    "room_http_url": "http://observer.local/api/v1/rooms/purrnet-live",
+                    "room_ws_url": "",
+                    "room_token": "observer-token",
+                    "scene_name": "Game",
+                    "player_count": 2,
+                    "created_at": "2026-03-25T10:00:00Z",
+                    "tick_rate": 30,
+                    "server_tick": 144,
+                    "manual_tick": False,
+                }
+            ]
+
+        async def fake_get_room(match_id: str) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            return (await fake_list_rooms())[0]
+
+        async def fake_get_snapshot(match_id: str) -> dict[str, object] | None:
+            if match_id != "purrnet-live":
+                return None
+            return {
+                "room_id": "purrnet-live",
+                "match_id": "purrnet-live",
+                "source": "purrnet_direct",
+                "map_id": "city_default",
+                "status": "running",
+                "server_tick": 144,
+                "server_time": int(time.time() * 1000),
+                "players": [
+                    {
+                        "player_id": "player_live_1",
+                        "player_name": "player_live_1",
+                        "connection_state": "in_game",
+                        "is_server_controlled": False,
+                        "authority_order": 0,
+                        "spawn_point_id": "purr_slot_0",
+                        "spawn_position": {"x": 0.0, "y": 0.5, "z": 0.0},
+                        "spawn_rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                        "ack_input_seq": 0,
+                        "client_time": 0,
+                        "server_received_time": 0,
+                        "input": {"throttle": 0.92, "steer": 0.15, "brake": False, "handbrake": False, "nitro": True},
+                        "position": {"x": 12.2, "y": 0.5, "z": -7.8},
+                        "rotation": {"x": 0.0, "y": 32.0, "z": 0.0},
+                        "velocity": {"x": 1.0, "y": 0.0, "z": 18.0},
+                        "angular_velocity": {"x": 0.0, "y": 0.3, "z": 0.0},
+                        "car_config": sample_car_config("Mustang"),
+                        "debug": {
+                            "resolved_car_config_name": "Mustang_PlayerCar",
+                            "grounded_wheels": 4,
+                            "wheel_count": 4,
+                            "current_gear": 3,
+                            "current_rpm": 4200.0,
+                            "motor_torque": 680.0,
+                            "speed_kph": 65.4,
+                            "tracked_queued": False,
+                            "tracked_spawned": True,
+                        },
+                    }
+                ],
+                "damage_states": [
+                    {
+                        "player_id": "player_live_1",
+                        "revision": 2,
+                        "width": 8,
+                        "height": 16,
+                        "map_b64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                    }
+                ],
+                "collisions": [
+                    {
+                        "sequence": 3,
+                        "server_time": int(time.time() * 1000),
+                        "primary_player_id": "player_live_1",
+                        "secondary_player_id": "bot_live_1",
+                        "world_point": {"x": 1.0, "y": 0.5, "z": 2.0},
+                        "world_normal": {"x": 0.0, "y": 1.0, "z": 0.0},
+                        "relative_velocity": {"x": 0.0, "y": 0.0, "z": 9.0},
+                        "impulse_vector": {"x": 0.0, "y": 0.0, "z": 4.0},
+                        "impulse_magnitude": 4.0,
+                    }
+                ],
+                "observer": {
+                    "source": "purrnet_direct",
+                    "mode": "Server",
+                    "scene_name": "Game",
+                    "started_at_utc": "2026-03-25T10:00:00Z",
+                    "uptime_sec": 12.5,
+                    "network": {"server_state": "Connected", "client_state": "Disconnected", "tick_rate": 30, "local_tick": 144},
+                    "prediction": {"has_prediction_manager": True, "prediction_spawned": True, "hierarchy_ready": True},
+                    "spawner": {"solo_bot_target": 1, "tracked_bot_players": 1, "queued_players": 0, "spawned_players": 2},
+                    "counts": {"active_player_cars": 1, "tracked_players": 2},
+                    "tracked_players": [
+                        {
+                            "player_id": "player_live_1",
+                            "is_bot": False,
+                            "queued": False,
+                            "spawned": True,
+                            "spawn_slot": 0,
+                            "spawn_point_id": "purr_slot_0",
+                            "spawn_position": {"x": 0.0, "y": 0.5, "z": 0.0},
+                            "spawn_rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "car_config": sample_car_config("Mustang"),
+                        },
+                        {
+                            "player_id": "bot_live_1",
+                            "is_bot": True,
+                            "queued": True,
+                            "spawned": False,
+                            "spawn_slot": 1,
+                            "spawn_point_id": "purr_slot_1",
+                            "spawn_position": {"x": 4.5, "y": 0.5, "z": 0.0},
+                            "spawn_rotation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "last_spawn_failure_reason": "player_not_loaded_in_scene",
+                            "car_config": sample_car_config("Cooper"),
+                        },
+                    ],
+                },
+            }
+
+        runtime.direct_observer.list_rooms = fake_list_rooms
+        runtime.direct_observer.get_room = fake_get_room
+        runtime.direct_observer.get_snapshot = fake_get_snapshot
+
+        matches = client.get("/api/v1/admin/matches", params={"token": "secret-token"})
+        assert matches.status_code == 200
+        payload = matches.json()
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["match_id"] == "purrnet-live"
+        assert payload["items"][0]["source"] == "purrnet_direct"
+        assert payload["items"][0]["debug_summary"]["bot_target"] == 1
+
+        detail = client.get("/api/v1/admin/matches/purrnet-live", params={"token": "secret-token"})
+        assert detail.status_code == 200
+        detail_payload = detail.json()
+        assert detail_payload["source"] == "purrnet_direct"
+        assert detail_payload["status"] == "running"
+        assert detail_payload["tick_rate"] == 30
+        assert len(detail_payload["players"]) == 2
+        active_player = next(player for player in detail_payload["players"] if player["player_id"] == "player_live_1")
+        queued_bot = next(player for player in detail_payload["players"] if player["player_id"] == "bot_live_1")
+        assert active_player["position"]["x"] == 12.2
+        assert active_player["car_config"]["loadout_name"] == "Mustang_Loadout"
+        assert active_player["damage_revision"] == 2
+        assert queued_bot["connection_state"] == "queued"
+        assert queued_bot["debug"]["last_spawn_failure_reason"] == "player_not_loaded_in_scene"
+        assert detail_payload["telemetry"]["spawner"]["solo_bot_target"] == 1
+        assert detail_payload["recent_collisions"][0]["primary_player_id"] == "player_live_1"
+
+
 def test_authoritative_simulation_snapshot_overrides_client_state() -> None:
     with build_client(simulation_service_url="http://simulation.local") as client:
         runtime = client.app.state.runtime

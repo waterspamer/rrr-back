@@ -16,12 +16,18 @@
     --sans: "Segoe UI", "Helvetica Neue", sans-serif;
 }
 
+html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
 * {
     box-sizing: border-box;
 }
 
 body {
     margin: 0;
+    overflow-x: hidden;
     font-family: var(--sans);
     color: var(--ink);
     background:
@@ -33,15 +39,16 @@ body {
 .shell {
     max-width: 1600px;
     margin: 0 auto;
-    padding: 28px;
+    padding: 24px;
+    min-width: 0;
 }
 
 .hero {
     display: flex;
     justify-content: space-between;
-    gap: 24px;
+    gap: 20px;
     align-items: flex-start;
-    margin-bottom: 20px;
+    margin-bottom: 18px;
 }
 
 .eyebrow,
@@ -125,7 +132,7 @@ h2 {
     align-items: end;
     gap: 16px;
     padding: 18px 20px;
-    margin-bottom: 20px;
+    margin-bottom: 18px;
 }
 
 .token-field {
@@ -203,15 +210,23 @@ button:disabled {
 
 .layout {
     display: grid;
-    grid-template-columns: 340px minmax(0, 1fr);
-    gap: 20px;
+    grid-template-columns: 320px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+    min-width: 0;
 }
 
 .rail,
 .content,
 .stack {
     display: grid;
-    gap: 20px;
+    gap: 18px;
+    min-width: 0;
+}
+
+.content > * {
+    align-self: start;
+    min-width: 0;
 }
 
 .list-panel,
@@ -219,6 +234,7 @@ button:disabled {
 .match-main,
 #lobbyDetailPanel {
     padding: 18px 20px;
+    min-width: 0;
 }
 
 .panel-head {
@@ -286,10 +302,16 @@ button:disabled {
     justify-content: space-between;
     gap: 10px;
     font-weight: 700;
+    min-width: 0;
 }
 
 .item-card p {
     margin: 8px 0 0;
+}
+
+.card-accent {
+    color: var(--accent);
+    font-weight: 700;
 }
 
 .summary-grid {
@@ -312,32 +334,42 @@ button:disabled {
 .lobby-players,
 .config-list,
 .telemetry-grid,
-.damage-grid {
+.damage-grid,
+.fact-grid {
     display: grid;
     gap: 12px;
+    align-items: start;
 }
 
 .telemetry-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.damage-grid {
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    margin-top: 10px;
+.fact-grid {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
-.telemetry-card {
+.fact-tile,
+.telemetry-card,
+.damage-card,
+.player-card {
     background: var(--panel-strong);
     border: 1px solid var(--line);
     border-radius: 16px;
     padding: 14px;
+    min-width: 0;
+    align-self: start;
+}
+
+.fact-tile strong {
+    display: block;
+    margin-top: 6px;
+    font-size: 15px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
 }
 
 .damage-card {
-    background: var(--panel-strong);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 14px;
     display: grid;
     gap: 10px;
 }
@@ -368,18 +400,19 @@ button:disabled {
     margin: 4px 0 10px;
 }
 
-.player-card {
-    background: var(--panel-strong);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 14px;
-}
-
 .player-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px 18px;
     margin-top: 10px;
+}
+
+.player-grid strong,
+.card-meta,
+code,
+td {
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .raw-block,
@@ -390,12 +423,14 @@ code {
 
 .match-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.85fr);
-    gap: 20px;
+    grid-template-columns: minmax(0, 1.4fr) minmax(300px, 0.85fr);
+    gap: 18px;
+    align-items: start;
     padding: 0;
     background: transparent;
     box-shadow: none;
     border: none;
+    min-width: 0;
 }
 
 .match-main,
@@ -404,6 +439,15 @@ code {
     border: 1px solid var(--line);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
+    align-self: start;
+    height: fit-content;
+}
+
+.map-panel {
+    align-self: start;
+    position: static;
+    top: auto;
+    overflow: hidden;
 }
 
 .match-summary {
@@ -412,6 +456,7 @@ code {
 
 .table-wrap {
     overflow-x: auto;
+    min-width: 0;
 }
 
 table {
@@ -470,6 +515,11 @@ canvas {
         grid-template-columns: 1fr;
     }
 
+    .map-panel {
+        position: static;
+        top: auto;
+    }
+
     .toolbar-stats {
         margin-left: 0;
     }
@@ -486,5 +536,9 @@ canvas {
 
     .toolbar {
         align-items: stretch;
+    }
+
+    .fact-grid {
+        grid-template-columns: 1fr;
     }
 }

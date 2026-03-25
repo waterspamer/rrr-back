@@ -257,6 +257,8 @@ class AdminMatchSummaryResponse(BaseModel):
     server_tick: int
     room_id: str | None = None
     room_status: str | None = None
+    source: str = "backend_runtime"
+    debug_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class AdminMatchesResponse(BaseModel):
@@ -275,6 +277,8 @@ class AdminMatchDetailResponse(BaseModel):
     room_http_url: str | None = None
     room_ws_url: str | None = None
     room_token: str | None = None
+    source: str = "backend_runtime"
+    debug_summary: dict[str, Any] = Field(default_factory=dict)
     players: list[AdminMatchPlayerResponse]
     recent_collisions: list[dict[str, Any]] = Field(default_factory=list)
     raw_snapshot: dict[str, Any]

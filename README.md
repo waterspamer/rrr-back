@@ -81,6 +81,8 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+If Unity dedicated observer runs on the same host outside Docker, set `DIRECT_OBSERVER_URL=http://host.docker.internal:7777`.
+
 ## Tests
 
 ```powershell
@@ -100,6 +102,8 @@ docker compose up -d --build
 3. Add nginx config from [`deploy/nginx.rrr-demo.conf`](/C:/Work/RRRBack/deploy/nginx.rrr-demo.conf).
 4. Issue a certificate with `certbot` after DNS is pointed to the server.
 5. Use [`deploy/redeploy.sh`](/C:/Work/RRRBack/deploy/redeploy.sh) for pull-and-rebuild redeploys.
+
+For direct PurrNet dedicated observer integration, configure `DIRECT_OBSERVER_URL`, `DIRECT_OBSERVER_SECRET`, and `DIRECT_OBSERVER_REQUEST_TIMEOUT_SEC`. When backend runs in Docker on the same machine as Unity dedicated, use `http://host.docker.internal:7777`.
 
 ## GitHub Actions redeploy
 
