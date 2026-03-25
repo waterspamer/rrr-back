@@ -19,6 +19,7 @@ from app.schemas import (
     AdminGameSettingsUpdateRequest,
     AdminLobbiesResponse,
     AdminLobbyResponse,
+    AdminPlayersResponse,
     AdminMatchDetailResponse,
     AdminMatchesResponse,
     HealthResponse,
@@ -31,6 +32,8 @@ from app.schemas import (
     LobbyStartSoloResponse,
     MatchInfoResponse,
     PaginatedLobbiesResponse,
+    PlayerProfileResponse,
+    PlayerProfileUpdateRequest,
     SessionGuestCreateRequest,
     SessionResponse,
     SimpleSuccessResponse,
@@ -112,6 +115,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         session = await runtime.create_guest_session(payload.player_name, request.client.host if request.client else "unknown")
         return runtime.serialize_public_session(session)
+
+    @app.get(f"{settings.api_prefix}/players/me", response_model=PlayerProfileResponse)
+    async def get_player_profile(
+        token: str = Depends(get_bearer_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        return await runtime.get_player_profile(session_token=token)
+
+    @app.put(f"{settings.api_prefix}/players/me", response_model=PlayerProfileResponse)
+    async def update_player_profile(
+        payload: PlayerProfileUpdateRequest,
+        token: str = Depends(get_bearer_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        return await runtime.update_player_profile(session_token=token, payload=payload.model_dump(mode="json", exclude_none=True))
 
     @app.get(f"{settings.api_prefix}/lobbies", response_model=PaginatedLobbiesResponse)
     async def list_lobbies(
@@ -204,6 +222,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
         return await runtime.get_admin_lobby(lobby_id)
+
+    @app.get(f"{settings.api_prefix}/admin/players", response_model=AdminPlayersResponse)
+    async def get_admin_players(
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.list_admin_players()
+
+    @app.get(f"{settings.api_prefix}/admin/players/{{player_id}}", response_model=PlayerProfileResponse)
+    async def get_admin_player(
+        player_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await runtime.get_admin_player(player_id)
 
     @app.delete(f"{settings.api_prefix}/admin/lobbies/{{lobby_id}}", response_model=AdminLobbyCloseResponse)
     async def close_admin_lobby(

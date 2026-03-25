@@ -38,6 +38,36 @@ class Session:
 
 
 @dataclass(slots=True)
+class PlayerGarageCar:
+    car_id: str
+    display_name: str
+    acquired_at: datetime
+    acquisition_source: str = "starter"
+    favorite: bool = False
+    tuning_preset_ids: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class PlayerProfile:
+    account_id: str
+    player_id: str
+    display_name: str
+    is_guest: bool
+    created_at: datetime
+    updated_at: datetime
+    balance_soft: int = 0
+    balance_premium: int = 0
+    level: int = 1
+    experience: int = 0
+    selected_car_id: str = "cooper"
+    selected_car_display_name: str = "Cooper"
+    owned_cars: list[PlayerGarageCar] = field(default_factory=list)
+    public_flags: dict[str, Any] = field(default_factory=dict)
+    private_data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class Vec3:
     x: float = 0.0
     y: float = 0.0

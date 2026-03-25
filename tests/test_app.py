@@ -82,6 +82,9 @@ def test_rest_lobby_lifecycle() -> None:
         session_1 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_1001"}).json()
         session_2 = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_1002"}).json()
 
+        assert session_1["player_profile"]["display_name"] == "Guest_1001"
+        assert session_1["player_profile"]["garage"]["owned_car_count"] >= 1
+
         create = client.post(
             "/api/v1/lobbies",
             headers={"Authorization": f"Bearer {session_1['session_token']}"},
@@ -104,6 +107,64 @@ def test_rest_lobby_lifecycle() -> None:
         lobby = client.get(f"/api/v1/lobbies/{lobby_id}").json()
         assert lobby["status"] == "waiting"
         assert lobby["current_players"] == 2
+        assert lobby["players"][0]["player_profile"]["garage"]["selected_car_id"] == "Cooper_Loadout"
+        assert lobby["players"][1]["player_profile"]["garage"]["selected_car_id"] == "Mustang_Loadout"
+
+
+def test_player_profile_roundtrip_and_admin_visibility() -> None:
+    with build_client_with_admin(admin_token="secret-token") as client:
+        session = client.post("/api/v1/sessions/guest", json={"player_name": "Guest_Profile"}).json()
+        token = session["session_token"]
+
+        current_profile = client.get("/api/v1/players/me", headers={"Authorization": f"Bearer {token}"})
+        assert current_profile.status_code == 200
+        assert current_profile.json()["garage"]["selected_car_id"] == "cooper"
+
+        update = client.put(
+            "/api/v1/players/me",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "display_name": "SleeperDriver",
+                "balance_soft": 125000,
+                "balance_premium": 7,
+                "level": 5,
+                "experience": 840,
+                "selected_car_id": "mustang_gt",
+                "selected_car_display_name": "Mustang GT",
+                "owned_cars": [
+                    {
+                        "car_id": "cooper",
+                        "display_name": "Cooper",
+                        "favorite": True,
+                        "tags": ["starter"],
+                    },
+                    {
+                        "car_id": "mustang_gt",
+                        "display_name": "Mustang GT",
+                        "favorite": False,
+                        "tags": ["muscle", "owned"],
+                    },
+                ],
+                "public_flags": {"vip": True},
+                "private_data": {"balance_source": "test_seed"},
+            },
+        )
+        assert update.status_code == 200
+        update_payload = update.json()
+        assert update_payload["display_name"] == "SleeperDriver"
+        assert update_payload["balance"]["soft"] == 125000
+        assert update_payload["garage"]["selected_car_id"] == "mustang_gt"
+        assert update_payload["garage"]["owned_car_count"] == 2
+        assert update_payload["public_flags"]["vip"] is True
+
+        admin_players = client.get("/api/v1/admin/players", params={"token": "secret-token"})
+        assert admin_players.status_code == 200
+        assert any(item["player_id"] == session["player_id"] for item in admin_players.json()["items"])
+
+        admin_player = client.get(f"/api/v1/admin/players/{session['player_id']}", params={"token": "secret-token"})
+        assert admin_player.status_code == 200
+        assert admin_player.json()["display_name"] == "SleeperDriver"
+        assert admin_player.json()["private_data"]["balance_source"] == "test_seed"
 
 
 def test_lobby_rejects_player_count_above_map_spawn_capacity() -> None:

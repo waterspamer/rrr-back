@@ -17,6 +17,77 @@ class SessionResponse(BaseModel):
     session_token: str
     created_at: str
     expires_at: str
+    player_profile: "PlayerProfileResponse"
+
+
+class PlayerGarageCarPayload(BaseModel):
+    car_id: str = Field(min_length=1, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    acquisition_source: str | None = Field(default=None, max_length=64)
+    favorite: bool = False
+    tuning_preset_ids: list[str] = Field(default_factory=list, max_length=32)
+    tags: list[str] = Field(default_factory=list, max_length=32)
+
+
+class PlayerBalanceResponse(BaseModel):
+    soft: int
+    premium: int
+
+
+class PlayerProgressionResponse(BaseModel):
+    level: int
+    experience: int
+
+
+class PlayerGarageCarResponse(BaseModel):
+    car_id: str
+    display_name: str
+    acquired_at: str
+    acquisition_source: str
+    favorite: bool = False
+    tuning_preset_ids: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class PlayerGarageResponse(BaseModel):
+    selected_car_id: str
+    selected_car_display_name: str
+    owned_car_count: int
+    owned_cars: list[PlayerGarageCarResponse] = Field(default_factory=list)
+
+
+class PlayerPublicProfileResponse(BaseModel):
+    player_id: str
+    account_id: str
+    display_name: str
+    is_guest: bool = True
+    balance: PlayerBalanceResponse
+    progression: PlayerProgressionResponse
+    garage: PlayerGarageResponse
+    public_flags: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlayerProfileResponse(PlayerPublicProfileResponse):
+    created_at: str
+    updated_at: str
+    private_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlayerProfileUpdateRequest(BaseModel):
+    display_name: str | None = Field(default=None, min_length=3, max_length=32)
+    balance_soft: int | None = Field(default=None, ge=0)
+    balance_premium: int | None = Field(default=None, ge=0)
+    level: int | None = Field(default=None, ge=1)
+    experience: int | None = Field(default=None, ge=0)
+    selected_car_id: str | None = Field(default=None, max_length=128)
+    selected_car_display_name: str | None = Field(default=None, max_length=128)
+    owned_cars: list[PlayerGarageCarPayload] | None = None
+    public_flags: dict[str, Any] | None = None
+    private_data: dict[str, Any] | None = None
+
+
+class AdminPlayersResponse(BaseModel):
+    items: list[PlayerProfileResponse] = Field(default_factory=list)
 
 
 class CarCustomization(BaseModel):
@@ -91,6 +162,7 @@ class LobbyPlayerResponse(BaseModel):
     is_server_controlled: bool = False
     joined_at: str | None = None
     car_config: dict[str, Any] | None = None
+    player_profile: PlayerPublicProfileResponse | None = None
 
 
 class LobbySummaryResponse(BaseModel):
@@ -161,6 +233,7 @@ class MatchPlayerInfoResponse(BaseModel):
     spawn_position: Vec3Response
     spawn_rotation: Vec3Response
     car_config: dict[str, Any]
+    player_profile: PlayerPublicProfileResponse | None = None
 
 
 class MatchInfoResponse(BaseModel):
@@ -194,6 +267,7 @@ class AdminLobbyPlayerResponse(BaseModel):
     loadout_display_name: str | None = None
     paint_name: str | None = None
     customizations: list[dict[str, Any]] = Field(default_factory=list)
+    player_profile: PlayerPublicProfileResponse | None = None
 
 
 class AdminLobbyResponse(BaseModel):
@@ -246,6 +320,7 @@ class AdminMatchPlayerResponse(BaseModel):
     damage_map_b64: str | None = None
     last_damage_at: str | None = None
     debug: dict[str, Any] = Field(default_factory=dict)
+    player_profile: PlayerPublicProfileResponse | None = None
 
 
 class AdminMatchSummaryResponse(BaseModel):
@@ -308,3 +383,6 @@ class AdminGameSettingsResponse(BaseModel):
     source: str = "backend_runtime"
     note: str | None = None
     sections: list[AdminGameSettingsSectionResponse] = Field(default_factory=list)
+
+
+SessionResponse.model_rebuild()

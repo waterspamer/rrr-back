@@ -26,6 +26,7 @@ from app.core.errors import (
 )
 from app.models import ConnectionState, Lobby, LobbyPlayer, LobbyStatus, Match, MatchPlayer, MatchStatus, Session, SpawnPoint, Vec3
 from app.services.direct_observer_service import DirectObserverClient
+from app.services.player_profile_service import PlayerProfileService
 from app.services.simulation_service import SimulationServiceClient
 
 
@@ -154,6 +155,7 @@ class RuntimeState:
             secret=settings.direct_observer_secret,
             timeout_sec=settings.direct_observer_request_timeout_sec,
         )
+        self.player_profiles = PlayerProfileService()
         self.lock = asyncio.Lock()
         self.sessions_by_token: dict[str, Session] = {}
         self.lobbies_by_id: dict[str, Lobby] = {}
@@ -211,6 +213,7 @@ class RuntimeState:
             created_at=created_at,
             expires_at=created_at + timedelta(hours=self.settings.session_ttl_hours),
         )
+        self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
         async with self.lock:
             self.sessions_by_token[session.session_token] = session
         logger.info("session_created session_id=%s player_id=%s", session.session_id, session.player_id)
@@ -242,6 +245,43 @@ class RuntimeState:
         end = start + page_size
         return [self._serialize_lobby_summary(item) for item in lobbies[start:end]], total
 
+    async def get_player_profile(self, *, session_token: str) -> dict[str, Any]:
+        session = await self.resolve_session(session_token)
+        profile = self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
+        return self.player_profiles.serialize_private(profile)
+
+    async def update_player_profile(self, *, session_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        session = await self.resolve_session(session_token)
+        profile = self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
+        updated_profile = self.player_profiles.update_profile(profile.player_id, payload)
+        if updated_profile is None:
+            raise invalid_request("Player profile is missing")
+
+        session.player_name = updated_profile.display_name
+        lobby_id = None
+        match_id = None
+        async with self.lock:
+            for active_session in self.sessions_by_token.values():
+                if active_session.player_id == session.player_id:
+                    active_session.player_name = updated_profile.display_name
+            lobby_id = self.player_to_lobby.get(session.player_id)
+            lobby = self.lobbies_by_id.get(lobby_id) if lobby_id else None
+            if lobby and session.player_id in lobby.players:
+                lobby.players[session.player_id].player_name = updated_profile.display_name
+                match_id = lobby.match_id
+            for match in self.matches_by_id.values():
+                if session.player_id in match.players:
+                    match.players[session.player_id].player_name = updated_profile.display_name
+                    match_id = match.match_id
+
+        if lobby_id:
+            await self._broadcast_lobby_snapshot(lobby_id)
+            await self._broadcast_admin_lobby_change(lobby_id)
+        if match_id:
+            await self._broadcast_admin_match_change(match_id)
+
+        return self.player_profiles.serialize_private(updated_profile)
+
     async def get_lobby(self, lobby_id: str) -> dict[str, Any]:
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
@@ -260,6 +300,8 @@ class RuntimeState:
     ) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
+        self.player_profiles.record_car_config_selection(session.player_id, car_config)
         spawn_points = self._get_map_spawn_points(map_id)
         if max_players > len(spawn_points):
             raise invalid_request(f"Map '{map_id}' supports at most {len(spawn_points)} players")
@@ -299,6 +341,8 @@ class RuntimeState:
     async def join_lobby(self, *, session_token: str, lobby_id: str, car_config: dict[str, Any]) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
+        self.player_profiles.record_car_config_selection(session.player_id, car_config)
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
             if lobby is None:
@@ -378,6 +422,8 @@ class RuntimeState:
     async def update_car_config(self, *, session_token: str, lobby_id: str, car_config: dict[str, Any]) -> dict[str, Any]:
         session = await self.resolve_session(session_token)
         self._check_lobby_rate_limit(session.player_id)
+        self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
+        self.player_profiles.record_car_config_selection(session.player_id, car_config)
         countdown_cancelled = False
         async with self.lock:
             lobby = self.lobbies_by_id.get(lobby_id)
@@ -467,6 +513,17 @@ class RuntimeState:
             if lobby is None:
                 raise lobby_not_found()
             return self._serialize_admin_lobby(lobby)
+
+    async def list_admin_players(self) -> dict[str, Any]:
+        return {
+            "items": [self.player_profiles.serialize_private(profile) for profile in self.player_profiles.list_profiles()]
+        }
+
+    async def get_admin_player(self, player_id: str) -> dict[str, Any]:
+        profile = self.player_profiles.get_profile(player_id)
+        if profile is None:
+            raise invalid_request("Player profile not found")
+        return self.player_profiles.serialize_private(profile)
 
     async def list_admin_matches(self) -> dict[str, Any]:
         async with self.lock:
@@ -1668,6 +1725,7 @@ class RuntimeState:
         return ConnectionState.connected if player_id in self.player_connections else ConnectionState.disconnected
 
     def _serialize_session(self, session: Session) -> dict[str, Any]:
+        profile = self.player_profiles.ensure_guest_profile(session.player_id, session.player_name)
         return {
             "session_id": session.session_id,
             "player_id": session.player_id,
@@ -1675,6 +1733,7 @@ class RuntimeState:
             "session_token": session.session_token,
             "created_at": session.created_at.isoformat() + "Z",
             "expires_at": session.expires_at.isoformat() + "Z",
+            "player_profile": self.player_profiles.serialize_private(profile),
         }
 
     def _serialize_lobby_player(self, player: LobbyPlayer, *, include_car_config: bool = True) -> dict[str, Any]:
@@ -1684,6 +1743,11 @@ class RuntimeState:
             "connection_state": player.connection_state.value,
             "is_server_controlled": player.is_server_controlled,
             "joined_at": player.joined_at.isoformat() + "Z",
+            "player_profile": self.player_profiles.build_public_payload(
+                player.player_id,
+                player.player_name,
+                is_server_controlled=player.is_server_controlled,
+            ),
         }
         if include_car_config:
             payload["car_config"] = player.car_config
@@ -1739,6 +1803,11 @@ class RuntimeState:
             "spawn_position": player.spawn_position.as_dict(),
             "spawn_rotation": player.spawn_rotation.as_dict(),
             "car_config": player.car_config,
+            "player_profile": self.player_profiles.build_public_payload(
+                player.player_id,
+                player.player_name,
+                is_server_controlled=player.is_server_controlled,
+            ),
         }
 
     def _serialize_admin_lobby_player(self, player: LobbyPlayer) -> dict[str, Any]:
@@ -1752,6 +1821,11 @@ class RuntimeState:
             "loadout_display_name": player.car_config.get("loadout_display_name"),
             "paint_name": player.car_config.get("paint_name"),
             "customizations": player.car_config.get("customizations", []),
+            "player_profile": self.player_profiles.build_public_payload(
+                player.player_id,
+                player.player_name,
+                is_server_controlled=player.is_server_controlled,
+            ),
         }
 
     def _serialize_admin_lobby(self, lobby: Lobby) -> dict[str, Any]:
@@ -1844,6 +1918,11 @@ class RuntimeState:
             "damage_map_b64": player.damage_map_b64,
             "last_damage_at": player.last_damage_at.isoformat() + "Z" if player.last_damage_at else None,
             "debug": player.debug_state,
+            "player_profile": self.player_profiles.build_public_payload(
+                player.player_id,
+                player.player_name,
+                is_server_controlled=player.is_server_controlled,
+            ),
         }
 
     def _serialize_admin_match_summary(self, match: Match) -> dict[str, Any]:
