@@ -4,15 +4,22 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Query, Request, Response, WebSocket
+from fastapi import Depends, FastAPI, File, Query, Request, Response, UploadFile, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.deps import get_admin_token, get_bearer_token, get_runtime
+from app.api.deps import (
+    get_admin_token,
+    get_bearer_token,
+    get_runtime,
+    get_vehicle_bundle_storage,
+    get_vehicle_content_registry,
+    get_vehicle_offer_registry,
+)
 from app.core.config import Settings, get_settings
-from app.core.errors import ApiError
+from app.core.errors import ApiError, invalid_request
 from app.schemas import (
     AdminLobbyCloseResponse,
     AdminGameSettingsResponse,
@@ -37,8 +44,20 @@ from app.schemas import (
     SessionGuestCreateRequest,
     SessionResponse,
     SimpleSuccessResponse,
+    VehicleContentListResponse,
+    VehicleContentManifestPayload,
+    VehicleContentManifestResponse,
+    VehicleContentPublishResponse,
+    VehicleBundleUploadResponse,
+    VehicleOfferListResponse,
+    VehicleOfferSyncResponse,
+    VehicleOfferUpdateRequest,
+    VehicleOfferUpdateResponse,
 )
 from app.services.runtime import RuntimeState
+from app.services.vehicle_bundle_storage import VehicleBundleStorage
+from app.services.vehicle_content_registry import VehicleContentRegistry
+from app.services.vehicle_offer_registry import VehicleOfferRegistry
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -58,6 +77,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.runtime = RuntimeState(settings)
+        app.state.vehicle_content_registry = VehicleContentRegistry(settings.content_storage_dir)
+        app.state.vehicle_bundle_storage = VehicleBundleStorage(settings.content_storage_dir)
+        app.state.vehicle_offer_registry = VehicleOfferRegistry(settings.content_storage_dir)
         yield
         await app.state.runtime.shutdown()
 
@@ -101,6 +123,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get(f"{settings.api_prefix}/health", response_model=HealthResponse)
     async def health(runtime: RuntimeState = Depends(get_runtime)) -> dict[str, int | str]:
         return {"status": "ok", **runtime.stats()}
+
+    @app.get(f"{settings.api_prefix}/content/vehicles", response_model=VehicleContentListResponse)
+    async def list_vehicle_content(
+        registry: VehicleContentRegistry = Depends(get_vehicle_content_registry),
+    ) -> dict[str, object]:
+        return {"items": registry.list_summaries()}
+
+    @app.get(f"{settings.api_prefix}/content/vehicles/{{vehicle_id}}", response_model=VehicleContentManifestResponse)
+    async def get_vehicle_content(
+        vehicle_id: str,
+        registry: VehicleContentRegistry = Depends(get_vehicle_content_registry),
+    ) -> dict[str, object]:
+        manifest = registry.get_manifest(vehicle_id)
+        if manifest is None:
+            raise invalid_request(f"Vehicle content '{vehicle_id}' was not found")
+        return manifest
+
+    @app.get(f"{settings.api_prefix}/content/vehicles/{{vehicle_id}}/offers", response_model=VehicleOfferListResponse)
+    async def get_vehicle_public_offers(
+        vehicle_id: str,
+        offers: VehicleOfferRegistry = Depends(get_vehicle_offer_registry),
+    ) -> dict[str, object]:
+        return {"vehicle_id": vehicle_id, "items": offers.list_public_offers(vehicle_id)}
+
+    @app.get(f"{settings.api_prefix}/content/bundles/{{bundle_id}}", include_in_schema=False)
+    async def download_vehicle_bundle(
+        bundle_id: str,
+        storage: VehicleBundleStorage = Depends(get_vehicle_bundle_storage),
+    ) -> FileResponse:
+        file_path = storage.get_file_path(bundle_id)
+        metadata = storage.get_metadata(bundle_id)
+        if file_path is None or metadata is None:
+            raise invalid_request(f"Bundle '{bundle_id}' was not found")
+
+        return FileResponse(
+            file_path,
+            media_type=str(metadata.get("content_type") or "application/octet-stream"),
+            filename=str(metadata.get("file_name") or file_path.name),
+        )
 
     @app.get("/admin", include_in_schema=False)
     @app.get("/admin/", include_in_schema=False)
@@ -282,6 +343,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, object]:
         runtime.validate_admin_token(admin_token)
         return await runtime.update_admin_game_settings(request.model_dump(mode="json"))
+
+    @app.post(
+        f"{settings.api_prefix}/admin/content/vehicles/publish",
+        response_model=VehicleContentPublishResponse,
+    )
+    async def publish_vehicle_content(
+        request: VehicleContentManifestPayload,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+        registry: VehicleContentRegistry = Depends(get_vehicle_content_registry),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return await registry.publish(request.model_dump(mode="json"))
+
+    @app.post(
+        f"{settings.api_prefix}/admin/content/vehicles/{{vehicle_id}}/bundle",
+        response_model=VehicleBundleUploadResponse,
+    )
+    async def upload_vehicle_bundle(
+        vehicle_id: str,
+        request: Request,
+        file: UploadFile = File(...),
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+        storage: VehicleBundleStorage = Depends(get_vehicle_bundle_storage),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        file_bytes = await file.read()
+        metadata = storage.upload(
+            vehicle_id=vehicle_id,
+            file_name=file.filename or f"{vehicle_id}.bundle",
+            file_bytes=file_bytes,
+            content_type=file.content_type,
+        )
+        base_url = str(request.base_url).rstrip("/")
+        metadata["bundle_url"] = f"{base_url}{settings.api_prefix}/content/bundles/{metadata['bundle_id']}"
+        return metadata
+
+    @app.post(
+        f"{settings.api_prefix}/admin/content/vehicles/{{vehicle_id}}/offers/sync",
+        response_model=VehicleOfferSyncResponse,
+    )
+    async def sync_vehicle_offers(
+        vehicle_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+        registry: VehicleContentRegistry = Depends(get_vehicle_content_registry),
+        offers: VehicleOfferRegistry = Depends(get_vehicle_offer_registry),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        manifest = registry.get_manifest(vehicle_id)
+        if manifest is None:
+            raise invalid_request(f"Vehicle content '{vehicle_id}' was not found")
+        return offers.sync_from_manifest(manifest)
+
+    @app.get(
+        f"{settings.api_prefix}/admin/content/vehicles/{{vehicle_id}}/offers",
+        response_model=VehicleOfferListResponse,
+    )
+    async def get_vehicle_admin_offers(
+        vehicle_id: str,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+        offers: VehicleOfferRegistry = Depends(get_vehicle_offer_registry),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return {"vehicle_id": vehicle_id, "items": offers.list_admin_offers(vehicle_id)}
+
+    @app.put(
+        f"{settings.api_prefix}/admin/content/vehicles/{{vehicle_id}}/offers",
+        response_model=VehicleOfferUpdateResponse,
+    )
+    async def update_vehicle_offers(
+        vehicle_id: str,
+        request: VehicleOfferUpdateRequest,
+        admin_token: str | None = Depends(get_admin_token),
+        runtime: RuntimeState = Depends(get_runtime),
+        offers: VehicleOfferRegistry = Depends(get_vehicle_offer_registry),
+    ) -> dict[str, object]:
+        runtime.validate_admin_token(admin_token)
+        return offers.update_offers(vehicle_id, request.model_dump(mode="json")["items"])
 
     @app.websocket(f"{settings.api_prefix}/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

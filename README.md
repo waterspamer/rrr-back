@@ -13,12 +13,21 @@ FastAPI backend for the `Russian Road Rage` lobby and authoritative multiplayer 
 - `PUT /api/v1/lobbies/{lobby_id}/car-config`
 - `GET /api/v1/matches/{match_id}`
 - `GET /api/v1/health`
+- `GET /api/v1/content/vehicles`
+- `GET /api/v1/content/vehicles/{vehicle_id}`
+- `GET /api/v1/content/vehicles/{vehicle_id}/offers`
+- `GET /api/v1/content/bundles/{bundle_id}`
 - `GET /api/v1/ws?session_token=...`
 - `GET /admin`
 - `GET /api/v1/admin/lobbies`
 - `GET /api/v1/admin/lobbies/{lobby_id}`
 - `GET /api/v1/admin/matches`
 - `GET /api/v1/admin/matches/{match_id}`
+- `POST /api/v1/admin/content/vehicles/publish`
+- `POST /api/v1/admin/content/vehicles/{vehicle_id}/bundle`
+- `POST /api/v1/admin/content/vehicles/{vehicle_id}/offers/sync`
+- `GET /api/v1/admin/content/vehicles/{vehicle_id}/offers`
+- `PUT /api/v1/admin/content/vehicles/{vehicle_id}/offers`
 - `GET /api/v1/admin/ws?token=...`
 
 ## WebSocket messages
@@ -67,6 +76,63 @@ Admin WebSocket events:
 - `match_created` websocket message now includes the same `players[]` spawn assignment payload
 - spawn assignment is server-authoritative and deterministic: players are ordered by `joined_at`, then mapped to configured spawn points for the selected `map_id`
 
+## Vehicle content registry
+
+- public catalog endpoint:
+  - `GET /api/v1/content/vehicles`
+- public latest manifest endpoint:
+  - `GET /api/v1/content/vehicles/{vehicle_id}`
+- admin publish endpoint:
+  - `POST /api/v1/admin/content/vehicles/publish`
+- auth:
+  - uses the same optional `ADMIN_TOKEN` as the rest of the admin API
+- storage:
+  - manifests are persisted under `CONTENT_STORAGE_DIR`
+  - latest manifests live in `vehicles/latest`
+  - published history is archived in `vehicles/history/{vehicle_id}`
+
+Current intent:
+
+- Unity editor exports semantic vehicle manifests
+- backend stores latest published manifest per vehicle
+- publish rejects changed content with the same `content_version`
+- diff info for added/removed domains and values is returned in the publish response
+
+## Bundle storage
+
+- admin upload endpoint:
+  - `POST /api/v1/admin/content/vehicles/{vehicle_id}/bundle`
+- public download endpoint:
+  - `GET /api/v1/content/bundles/{bundle_id}`
+- storage:
+  - bundle binaries are stored under `CONTENT_STORAGE_DIR/bundles/files`
+  - bundle metadata is stored under `CONTENT_STORAGE_DIR/bundles/meta`
+
+Current intent:
+
+- Unity editor builds one vehicle content bundle per vehicle
+- backend stores the uploaded binary and exposes a stable download URL
+- manifest publish can reference uploaded `bundle_id`, `bundle_hash`, and `bundle_url`
+
+## Offer registry
+
+- public offers endpoint:
+  - `GET /api/v1/content/vehicles/{vehicle_id}/offers`
+- admin sync endpoint:
+  - `POST /api/v1/admin/content/vehicles/{vehicle_id}/offers/sync`
+- admin list endpoint:
+  - `GET /api/v1/admin/content/vehicles/{vehicle_id}/offers`
+- admin update endpoint:
+  - `PUT /api/v1/admin/content/vehicles/{vehicle_id}/offers`
+
+Current intent:
+
+- backend derives generic per-vehicle offers from published manifest `domain_id/value_id`
+- new offers are generated automatically during sync
+- removed options are marked `deprecated`
+- existing prices are preserved across syncs
+- public endpoint exposes only `published` offers
+
 ## Local run
 
 ```powershell
@@ -82,6 +148,7 @@ docker compose up -d --build
 ```
 
 If Unity dedicated observer runs on the same host outside Docker, set `DIRECT_OBSERVER_URL=http://host.docker.internal:7777`.
+If you want vehicle content publishing enabled with persistent storage, also set `CONTENT_STORAGE_DIR`.
 
 ## Tests
 

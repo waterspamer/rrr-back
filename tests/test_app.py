@@ -68,6 +68,51 @@ def build_client_with_admin(admin_token: str = "", **overrides) -> TestClient:
     return TestClient(app)
 
 
+def sample_vehicle_manifest(vehicle_id: str = "cooper", content_version: int = 1) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "vehicle_id": vehicle_id,
+        "display_name": "Mini Cooper",
+        "manufacturer": "Mini",
+        "description": "Compact hatchback",
+        "content_version": content_version,
+        "content_hash": f"hash_{vehicle_id}_{content_version}",
+        "prefab_name": "Cooper_Vehicle",
+        "generated_at": "2026-04-16T12:00:00Z",
+        "bundle": {
+            "bundle_id": f"{vehicle_id}_bundle",
+            "bundle_hash": f"bundle_hash_{content_version}",
+            "bundle_url": f"https://cdn.example.com/{vehicle_id}/{content_version}",
+        },
+        "defaults": [
+            {"domain_id": "body", "value_id": "stock"},
+            {"domain_id": "paint_color", "value_id": "green"},
+        ],
+        "domains": [
+            {
+                "domain_id": "body",
+                "display_name": "Body",
+                "source_type": "visual_slot",
+                "selector_path": "Body",
+                "values": [
+                    {"value_id": "stock", "display_name": "Stock", "source_name": "Stock"},
+                    {"value_id": "jcw", "display_name": "JCW", "source_name": "JCW"},
+                ],
+            },
+            {
+                "domain_id": "paint_color",
+                "display_name": "Paint Color",
+                "source_type": "paint_palette",
+                "selector_path": None,
+                "values": [
+                    {"value_id": "green", "display_name": "British Green", "source_name": "Green"},
+                    {"value_id": "red", "display_name": "Red", "source_name": "Red"},
+                ],
+            },
+        ],
+    }
+
+
 def receive_until(ws, expected_types: set[str], max_messages: int = 32) -> dict[str, object]:
     last_message = None
     for _ in range(max_messages):
@@ -389,6 +434,138 @@ def test_start_solo_creates_match_with_idle_server_car() -> None:
             ws.send_json({"type": "match_loaded", "match_id": solo_payload["match_id"]})
             started = receive_until(ws, {"match_started"}, max_messages=32)
             assert started["match_id"] == solo_payload["match_id"]
+
+
+def test_vehicle_content_publish_and_readback(tmp_path) -> None:
+    with build_client_with_admin(admin_token="content-secret", content_storage_dir=str(tmp_path)) as client:
+        publish = client.post(
+            "/api/v1/admin/content/vehicles/publish",
+            params={"token": "content-secret"},
+            json=sample_vehicle_manifest(),
+        )
+        assert publish.status_code == 200
+        publish_payload = publish.json()
+        assert publish_payload["published"] is True
+        assert publish_payload["created"] is True
+        assert publish_payload["current"]["vehicle_id"] == "cooper"
+        assert any(change["change_type"] == "domain_added" for change in publish_payload["changes"])
+
+        listed = client.get("/api/v1/content/vehicles")
+        assert listed.status_code == 200
+        assert listed.json()["items"][0]["vehicle_id"] == "cooper"
+
+        detail = client.get("/api/v1/content/vehicles/cooper")
+        assert detail.status_code == 200
+        assert detail.json()["content_version"] == 1
+        assert detail.json()["defaults"][0]["domain_id"] == "body"
+
+
+def test_vehicle_content_publish_requires_version_bump_for_changed_hash(tmp_path) -> None:
+    with build_client_with_admin(admin_token="content-secret", content_storage_dir=str(tmp_path)) as client:
+        first = client.post(
+            "/api/v1/admin/content/vehicles/publish",
+            params={"token": "content-secret"},
+            json=sample_vehicle_manifest(content_version=3),
+        )
+        assert first.status_code == 200
+
+        conflicting = sample_vehicle_manifest(content_version=3)
+        conflicting["content_hash"] = "different_hash"
+        conflict_response = client.post(
+            "/api/v1/admin/content/vehicles/publish",
+            params={"token": "content-secret"},
+            json=conflicting,
+        )
+        assert conflict_response.status_code == 400
+        assert "bump content_version" in conflict_response.json()["message"]
+
+
+def test_vehicle_content_persists_across_app_restart(tmp_path) -> None:
+    with build_client_with_admin(admin_token="content-secret", content_storage_dir=str(tmp_path)) as client:
+        publish = client.post(
+            "/api/v1/admin/content/vehicles/publish",
+            params={"token": "content-secret"},
+            json=sample_vehicle_manifest(vehicle_id="mustang", content_version=2),
+        )
+        assert publish.status_code == 200
+
+    with build_client(content_storage_dir=str(tmp_path)) as client:
+        listed = client.get("/api/v1/content/vehicles")
+        assert listed.status_code == 200
+        assert any(item["vehicle_id"] == "mustang" for item in listed.json()["items"])
+
+        detail = client.get("/api/v1/content/vehicles/mustang")
+        assert detail.status_code == 200
+        assert detail.json()["content_hash"] == "hash_mustang_2"
+
+
+def test_vehicle_bundle_upload_and_download(tmp_path) -> None:
+    with build_client_with_admin(admin_token="content-secret", content_storage_dir=str(tmp_path)) as client:
+        response = client.post(
+            "/api/v1/admin/content/vehicles/cooper/bundle",
+            params={"token": "content-secret"},
+            files={"file": ("cooper.bundle", b"vehicle-bundle-bytes", "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["vehicle_id"] == "cooper"
+        assert payload["bundle_id"].startswith("cooper_")
+        assert payload["file_size_bytes"] == len(b"vehicle-bundle-bytes")
+        assert payload["bundle_url"].endswith(payload["bundle_id"])
+
+        bundle = client.get(payload["bundle_url"])
+        assert bundle.status_code == 200
+        assert bundle.content == b"vehicle-bundle-bytes"
+
+
+def test_vehicle_offer_sync_update_and_public_readback(tmp_path) -> None:
+    with build_client_with_admin(admin_token="content-secret", content_storage_dir=str(tmp_path)) as client:
+        publish = client.post(
+            "/api/v1/admin/content/vehicles/publish",
+            params={"token": "content-secret"},
+            json=sample_vehicle_manifest(),
+        )
+        assert publish.status_code == 200
+
+        sync = client.post(
+            "/api/v1/admin/content/vehicles/cooper/offers/sync",
+            params={"token": "content-secret"},
+        )
+        assert sync.status_code == 200
+        sync_payload = sync.json()
+        assert sync_payload["created_count"] >= 1
+        assert any(item["offer_id"] == "cooper:body:stock" for item in sync_payload["items"])
+
+        public_before = client.get("/api/v1/content/vehicles/cooper/offers")
+        assert public_before.status_code == 200
+        assert any(item["offer_id"] == "cooper:body:stock" for item in public_before.json()["items"])
+        assert all(item["state"] == "published" for item in public_before.json()["items"])
+
+        update = client.put(
+            "/api/v1/admin/content/vehicles/cooper/offers",
+            params={"token": "content-secret"},
+            json={
+                "items": [
+                    {
+                        "offer_id": "cooper:body:jcw",
+                        "state": "published",
+                        "soft_price": 12500,
+                        "premium_price": 4,
+                        "display_name": "Body: JCW Pack",
+                    }
+                ]
+            },
+        )
+        assert update.status_code == 200
+        update_payload = update.json()
+        jcw = next(item for item in update_payload["items"] if item["offer_id"] == "cooper:body:jcw")
+        assert jcw["soft_price"] == 12500
+        assert jcw["premium_price"] == 4
+        assert jcw["state"] == "published"
+
+        public_after = client.get("/api/v1/content/vehicles/cooper/offers")
+        assert public_after.status_code == 200
+        assert any(item["offer_id"] == "cooper:body:jcw" for item in public_after.json()["items"])
 
 
 def test_customizations_roundtrip_via_rest_and_realtime() -> None:

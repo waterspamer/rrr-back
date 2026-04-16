@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     direct_observer_url: str = ""
     direct_observer_secret: str = ""
     direct_observer_request_timeout_sec: float = 3.0
+    content_storage_dir: str = "./data/content"
     docs_url: str | None = Field(default="/docs")
     redoc_url: str | None = Field(default="/redoc")
 

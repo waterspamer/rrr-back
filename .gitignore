@@ -129,6 +129,7 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .pypirc
+data/
 
 # Marimo
 marimo/_static/

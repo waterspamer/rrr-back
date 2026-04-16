@@ -257,6 +257,141 @@ class HealthResponse(BaseModel):
     sessions: int
 
 
+class VehicleContentValuePayload(BaseModel):
+    value_id: str = Field(min_length=1, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    source_name: str | None = Field(default=None, max_length=128)
+
+
+class VehicleContentDomainPayload(BaseModel):
+    domain_id: str = Field(min_length=1, max_length=128)
+    display_name: str | None = Field(default=None, max_length=128)
+    source_type: str = Field(default="visual_slot", max_length=64)
+    selector_path: str | None = Field(default=None, max_length=128)
+    values: list[VehicleContentValuePayload] = Field(default_factory=list, max_length=256)
+
+
+class VehicleContentSelectionPayload(BaseModel):
+    domain_id: str = Field(min_length=1, max_length=128)
+    value_id: str = Field(min_length=1, max_length=128)
+
+
+class VehicleBundlePayload(BaseModel):
+    bundle_id: str | None = Field(default=None, max_length=128)
+    bundle_hash: str | None = Field(default=None, max_length=256)
+    bundle_url: str | None = Field(default=None, max_length=512)
+
+
+class VehicleContentManifestPayload(BaseModel):
+    schema_version: int = Field(default=1, ge=1)
+    vehicle_id: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=128)
+    manufacturer: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=2048)
+    content_version: int = Field(ge=1)
+    content_hash: str = Field(min_length=1, max_length=256)
+    prefab_name: str | None = Field(default=None, max_length=128)
+    generated_at: str | None = Field(default=None, max_length=64)
+    bundle: VehicleBundlePayload | None = None
+    defaults: list[VehicleContentSelectionPayload] = Field(default_factory=list, max_length=128)
+    domains: list[VehicleContentDomainPayload] = Field(default_factory=list, max_length=256)
+
+
+class VehicleContentManifestResponse(VehicleContentManifestPayload):
+    published_at: str
+
+
+class VehicleContentSummaryResponse(BaseModel):
+    vehicle_id: str
+    display_name: str
+    content_version: int
+    content_hash: str
+    published_at: str
+    domain_count: int
+    option_count: int
+
+
+class VehicleContentListResponse(BaseModel):
+    items: list[VehicleContentSummaryResponse] = Field(default_factory=list)
+
+
+class VehicleContentPublishChangeResponse(BaseModel):
+    change_type: str
+    domain_id: str | None = None
+    value_id: str | None = None
+
+
+class VehicleContentPublishResponse(BaseModel):
+    published: bool
+    created: bool
+    updated: bool
+    unchanged: bool
+    previous_content_version: int | None = None
+    current: VehicleContentSummaryResponse
+    changes: list[VehicleContentPublishChangeResponse] = Field(default_factory=list)
+
+
+class VehicleBundleUploadResponse(BaseModel):
+    vehicle_id: str
+    bundle_id: str
+    file_name: str
+    content_type: str
+    file_size_bytes: int
+    bundle_hash: str
+    bundle_url: str
+    uploaded_at: str
+
+
+class VehicleOfferResponse(BaseModel):
+    offer_id: str
+    vehicle_id: str
+    domain_id: str
+    value_id: str
+    display_name: str
+    value_display_name: str
+    source_name: str = ""
+    is_default: bool = False
+    state: str
+    soft_price: int = 0
+    premium_price: int = 0
+    bundle_id: str = ""
+    last_content_version: int = 0
+    last_content_hash: str = ""
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class VehicleOfferListResponse(BaseModel):
+    vehicle_id: str
+    items: list[VehicleOfferResponse] = Field(default_factory=list)
+
+
+class VehicleOfferSyncResponse(BaseModel):
+    vehicle_id: str
+    created_count: int
+    updated_count: int
+    deprecated_count: int
+    items: list[VehicleOfferResponse] = Field(default_factory=list)
+
+
+class VehicleOfferUpdatePayload(BaseModel):
+    offer_id: str = Field(min_length=1, max_length=256)
+    display_name: str | None = Field(default=None, max_length=256)
+    state: str | None = Field(default=None, max_length=32)
+    soft_price: int | None = Field(default=None, ge=0)
+    premium_price: int | None = Field(default=None, ge=0)
+
+
+class VehicleOfferUpdateRequest(BaseModel):
+    items: list[VehicleOfferUpdatePayload] = Field(default_factory=list, max_length=512)
+
+
+class VehicleOfferUpdateResponse(BaseModel):
+    vehicle_id: str
+    updated_count: int
+    items: list[VehicleOfferResponse] = Field(default_factory=list)
+
+
 class AdminLobbyPlayerResponse(BaseModel):
     player_id: str
     player_name: str
